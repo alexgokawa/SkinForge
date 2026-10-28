@@ -10,6 +10,8 @@ import sys
 import threading
 import time
 import traceback
+
+from . import log as L
 import webbrowser
 import zipfile
 from collections import OrderedDict
@@ -139,8 +141,8 @@ class App:
             p["sources_by_game"] = json.loads(json.dumps(self.project.get("sources_by_game", {})))
         else:
             p["sources"] = self.find_sources(game)
-            gf = self._game_folders().get(game)
-            if gf and os.path.isdir(gf) and gf not in p["sources"]:
+            gf = self._game_folder(game)
+            if gf and gf not in p["sources"]:
                 p["sources"].append(gf)
         self.project, self.project_file = p, os.path.join(folder, "project.json")
         B.save_project(p, self.project_file)
@@ -215,6 +217,23 @@ class App:
             gf["ats"] = self.settings.pop("game_folder")
         return gf
 
+    def _stash_key(self, game, sources):
+        p = self.project
+        return (game, tuple(sources), int(p.get("resolution", 4096)), id(p))
+
+    def _game_folder(self, game):
+        """The game files for this game: the folder the user picked before, else the Steam
+        install found on this PC (read in place - nothing to extract)."""
+        gf = self._game_folders().get(game)
+        if gf and os.path.isdir(gf):
+            return gf
+        from .scsarchive import find_game_installs
+        found = find_game_installs().get(game)
+        if found:
+            self._game_folders()[game] = found
+            self._save_settings()
+        return found
+
     def set_game(self, game):
         """ATS / ETS2 switch: each game keeps its own sources, game files and mod folder."""
         if game not in GAME_KEY:
@@ -229,8 +248,8 @@ class App:
         srcs = sbg.get(game)
         if srcs is None:
             srcs = self.find_sources(game)
-            gf = self._game_folders().get(game)
-            if gf and os.path.isdir(gf):
+            gf = self._game_folder(game)
+            if gf:
                 srcs.append(gf)
         p["sources"] = srcs
         mod = P.game_mod_dirs().get(GAME_KEY[game])
@@ -239,6 +258,18 @@ class App:
         self.settings["last_game"] = game
         self._save_settings()
         self.save()
+        # keep what was loaded for the game we leave; switching back is then instant
+        stash = getattr(self, "_game_stash", {})
+        self._game_stash = stash
+        if self._src is not None and not self.busy:
+            stash[old] = (self._stash_key(old, sbg[old]), self._src, self.trailers, self.source_status)
+        cached = stash.get(game)
+        if cached and cached[0] == self._stash_key(game, srcs):
+            _k, self._src, self.trailers, self.source_status = cached
+            self._gen = getattr(self, "_gen", 0) + 1
+            with self.cache_lock:
+                self.tmpl_cache.clear(); self.guide_cache.clear(); self.png_cache.clear()
+            return
         self.load_sources()
 
     def load_truck(self, tid):
@@ -254,13 +285,83 @@ class App:
         if tid not in lst:
             lst.append(tid)
         res = int(self.project.get("resolution", 4096))
+        t0 = time.time()
+        L.info(f"Load truck {tid} at {res}")
         t = scsgame.scan_truck(game, tid, res, progress=lambda m: setattr(self, "busy", m))
+        L.info(f"Loaded truck {tid}: {len(t.slots)} slots in {time.time() - t0:.1f}s"
+               + (f" - {t.error}" if getattr(t, "error", "") else ""))
         kind = "mod3d_truck" if scsgame.is_mod(game, f"/def/vehicle/truck/{tid}") else "scs_truck"
         t.lazy, t.vkind = False, kind
         if not t.slots:
             t.error = scsgame.empty_reason(game, tid)
         self.trailers = [t if (x.id == tid and getattr(x, "vkind", "") in ("scs_truck", "mod3d_truck")) else x
                          for x in self.trailers]
+        self.busy = ""
+        self.save()
+
+    def load_car(self, tid):
+        """Read one Road Trip car's models (Load button)."""
+        from . import scsgame
+        game = getattr(self._src, "game", None)
+        if game is None:
+            raise ValueError("Add your ATS game folder first (Road Trip cars come from the game files)")
+        lst = self.project.setdefault("scs_cars", [])
+        if tid not in lst:
+            lst.append(tid)
+        res = int(self.project.get("resolution", 4096))
+        t0 = time.time()
+        L.info(f"Load car {tid} at {res}")
+        t = scsgame.scan_truck(game, tid, res, progress=lambda m: setattr(self, "busy", m), vroot="car")
+        L.info(f"Loaded car {tid}: {len(t.slots)} slots in {time.time() - t0:.1f}s")
+        t.lazy, t.vkind = False, "scs_car"
+        if not t.slots:
+            t.error = scsgame.empty_reason(game, tid, "car")
+        self.trailers = [t if (x.id == tid and getattr(x, "vkind", "") == "scs_car") else x for x in self.trailers]
+        self.busy = ""
+        self.save()
+
+    def _replace_missing_game_folder(self):
+        """A game-files folder that no longer exists (moved / renamed extract) is swapped for
+        the game install found on this PC, so the user isn't left with a red source."""
+        p = self.project
+        srcs = list(p.get("sources", []))
+        gone = [s for s in srcs if not os.path.exists(s) and not s.lower().endswith((".scs", ".zip"))]
+        if not gone:
+            return
+        game = p.get("game", "ats")
+        gf = self._game_folders()
+        if gf.get(game) in gone:
+            gf.pop(game, None)
+        found = self._game_folder(game)
+        if not found or found in srcs:
+            return
+        p["sources"] = [found if s == gone[0] else s for s in srcs if s not in gone[1:]]
+        self.save()
+
+    def _trailers_in_use(self):
+        """SCS trailers read at start: the ones loaded before + any this project has art for."""
+        p = self.project
+        keys = set(p.get("slots", {}))
+        for art in p.get("skin_art", {}).values():
+            keys |= set(art)
+        return set(p.get("scs_trailers", [])) | {k.split("/")[0] for k in keys if k.startswith("scs.")}
+
+    def load_trailer(self, tid):
+        """Read one SCS trailer's models (Load button)."""
+        from . import scsgame
+        game = getattr(self._src, "game", None)
+        if game is None:
+            raise ValueError("Add your game folder first")
+        lst = self.project.setdefault("scs_trailers", [])
+        if tid not in lst:
+            lst.append(tid)
+        res = int(self.project.get("resolution", 4096))
+        t0 = time.time()
+        L.info(f"Load trailer {tid} at {res}")
+        t = scsgame.scan_trailer(game, tid, res, progress=lambda m: setattr(self, "busy", m))
+        L.info(f"Loaded trailer {tid}: {len(t.slots)} slots in {time.time() - t0:.1f}s")
+        t.lazy = False
+        self.trailers = [t if (x.id == tid and getattr(x, "vkind", "") == "scs") else x for x in self.trailers]
         self.busy = ""
         self.save()
 
@@ -311,6 +412,7 @@ class App:
     def _load_sources(self, gen):
         p = self.project
         status, ok, trailers = [], [], []
+        self._replace_missing_game_folder()
         for s in p.get("sources", []):
             try:
                 from .scs import open_source
@@ -326,7 +428,9 @@ class App:
             try:
                 trailers = catalog.scan(src, int(p.get("resolution", 4096)),
                                         trucks_loaded=tuple(p.get("scs_trucks", [])),
-                                        progress=lambda m: setattr(self, "busy", m))
+                                        cars_loaded=tuple(p.get("scs_cars", [])),
+                                        progress=lambda m: setattr(self, "busy", m),
+                                        trailers_loaded=self._trailers_in_use())
             except Exception as e:
                 traceback.print_exc()
                 status.append({"path": "", "ok": False, "error": f"scan failed: {e}"})
@@ -345,6 +449,9 @@ class App:
             if gen != self._gen or p is not self.project:
                 return            # sources changed meanwhile: a newer scan owns the result
             self._src, self.trailers, self.source_status = src, trailers, status
+            L.info(f"Sources ({p.get('game')}): " + "; ".join(
+                f"{x['path']} {'ok ' + x.get('kind', '') if x.get('ok') else 'FAILED: ' + x.get('error', '')}" for x in status)
+                + f" -> {len(trailers)} vehicles/groups")
             self.busy = ""
         threading.Thread(target=self._prewarm, args=(trailers,), daemon=True).start()
 
@@ -823,10 +930,17 @@ class App:
         written = []
         done_paths = set()
         res = int(self.project.get("resolution", 4096))
+        try:
+            want = int(self.project.get("template_size") or 0)   # 0 = same as the texture size
+        except (TypeError, ValueError):
+            want = 0
+        from . import scsgame
         for key in keys:
             s = self.slot(key)
             if not s or (s.kind == "logo" and not s.template_dds):
                 continue
+            vres = int((self.project.get("res_by_vehicle") or {}).get(s.trailer) or res)
+            eff = want or vres   # this vehicle's template size
             jobs = [(-1, s.template_dds, "")] + [(o.index, o.template_mask, f"_part{o.index}") for o in s.overrides]
             for ovr, path, suffix in jobs:
                 if not path or path.lower() in done_paths:
@@ -842,6 +956,14 @@ class App:
                 if s.kind == "logo":
                     lw, lh = logos.size_for(s.token)
                     full = B._fit_contain(full, lw) if lw == lh else full.resize((lw, lh))   # the author's texture size
+                elif s.kind == "scs" and eff != res:
+                    # model-made: the size this part gets at that texture size (cab = 2K/4K/8K,
+                    # parts in proportion), re-drawn from the model so the lines stay sharp
+                    f = eff / res
+                    size = (max(4, int(full.size[0] * f)), max(4, int(full.size[1] * f)))
+                    full = render_at_or_resize(scsgame, path, full, size)
+                elif s.kind != "scs" and (want or vres != res) and max(full.size) != eff:   # long side = chosen size
+                    full = full.resize(T.scaled_size(full.size, eff), Image.Resampling.LANCZOS)
                 elif s.kind != "scs" and max(full.size) < res:   # paint at the project resolution (e.g. 2048 templates -> 4096)
                     full = full.resize(T.scaled_size(full.size, res), Image.Resampling.LANCZOS)
                 label = re.sub(r"[^A-Za-z0-9]+", "_", s.label).strip("_") or "main"
@@ -863,7 +985,8 @@ class App:
         with open(readme, "w", encoding="utf-8") as f:
             f.write(
                 "SkinForge templates\n===================\n\n"
-                "<name>.png       -> the author's template at your project texture size. Paint over it,\n"
+                "<name>.png       -> the template at the size picked under Template size (default: your\n"
+                "                   project texture size). Paint over it,\n"
                 "                   then hide/delete the template layer before exporting your PNG.\n"
                 "<name>_GUIDE.png -> (only if 'Also export guide overlays' is on) line art on transparent,\n"
                 "                   for use as a locked top layer instead of the template.\n\n"
@@ -884,25 +1007,82 @@ class App:
         threading.Thread(target=self._build, daemon=True).start()
         return True
 
+    def output_path(self):
+        p = self.project
+        out_dir = p.get("output_dir") or os.path.join(self.project_dir, "output")
+        return os.path.join(out_dir, B.safe_filename(p["mod_name"]) + ".scs")
+
+    def check_output(self):
+        """Is there already a .scs at the build path, and was it built from THIS project? A
+        SkinForge mod names its paint jobs <unit code><NN>, so the codes inside tell them apart
+        (a forgotten mod name would otherwise overwrite another mod)."""
+        import zipfile
+        out = self.output_path()
+        r = {"path": out, "exists": os.path.isfile(out), "ours": False, "codes": [], "skinforge": False}
+        if not r["exists"]:
+            return r
+        st = os.stat(out)
+        r["mtime"], r["size"] = st.st_mtime, st.st_size
+        code = (self.project.get("code") or "").lower()
+        try:
+            with zipfile.ZipFile(out) as z:
+                names = z.namelist()
+            r["skinforge"] = any(n.lower().endswith("skinforge_matte.tobj") or "/paint_job/" in n for n in names)
+            toks = {n.rsplit("/", 1)[-1][:-4].lower() for n in names
+                    if "/paint_job/" in n and "/accessory/" not in n and n.lower().endswith(".sii")}
+            codes = sorted({re.match(r"^([a-z0-9_]*?)\d{2}", t).group(1) for t in toks if re.match(r"^([a-z0-9_]*?)\d{2}", t)})
+            r["codes"] = codes
+            r["ours"] = bool(code) and code in codes
+        except (zipfile.BadZipFile, OSError):
+            pass      # not a ZIP mod (or locked): certainly not this project's
+        # who built it last on this PC: a copied project keeps the unit code, so the code alone
+        # can't tell "my last build" from "the mod I made from the project I copied"
+        by = (self.settings.get("built_by") or {}).get(os.path.normcase(os.path.abspath(out)))
+        same_file = bool(by) and abs(by.get("mtime", 0) - st.st_mtime) < 2
+        r["last_by_this"] = bool(by) and same_file and by.get("project") == self.project_file
+        if r["ours"] and by and same_file and by.get("project") != self.project_file:
+            r["ours"] = False
+            r["other_project"] = by.get("project")
+        r["ask"] = (not r["ours"]) or bool(self.project.get("ask_overwrite", True))
+        return r
+
+    def _remember_build(self, out):
+        try:
+            bb = self.settings.setdefault("built_by", {})
+            bb[os.path.normcase(os.path.abspath(out))] = {"project": self.project_file, "mtime": os.stat(out).st_mtime}
+            if len(bb) > 300:
+                for k in list(bb)[:-300]:
+                    bb.pop(k, None)
+            self._save_settings()
+        except OSError:
+            pass
+
     def _build(self):
         st = self.build_state
         try:
             p = self.project
-            out_dir = p.get("output_dir") or os.path.join(self.project_dir, "output")
-            os.makedirs(out_dir, exist_ok=True)
-            out = os.path.join(out_dir, B.safe_filename(p["mod_name"]) + ".scs")
+            out = self.output_path()
+            os.makedirs(os.path.dirname(out), exist_ok=True)
             st["log"].append(f"Building {os.path.basename(out)}")
+            L.info(f"Build {out} · res {p.get('resolution')} · finish {p.get('finish')} · "
+                   f"per vehicle res {p.get('res_by_vehicle') or {}} finish {p.get('finish_by_vehicle') or {}} "
+                   f"lock {p.get('lock_by_vehicle') or {}} · skins {len([x for x in p['skins'] if not x.get('deleted')])}")
             r = B.build(p, self.project_dir, self.trailers, out, progress=lambda m: st["log"].append(m),
                         compose=(self.compose_sig, self.compose_full))
             self.save()
+            self._remember_build(r.path)
             st["result"] = {"path": r.path, "units": r.units, "warnings": r.warnings,
                             "seconds": round(r.seconds, 1), "size": r.size}
             st["log"].append(f"Done in {r.seconds:.1f}s - {r.size / 1048576:.1f} MB")
+            L.info(f"Built {len(r.units)} units in {r.seconds:.1f}s, {r.size / 1048576:.1f} MB: "
+                   + ", ".join(f"{u['token']}={u['trailer']}" for u in r.units)
+                   + "".join(f"\nwarning: {w}" for w in r.warnings))
         except B.BuildError as e:
+            L.warn(f"Build stopped: {e}")
             st["error"] = str(e)
         except Exception as e:
-            traceback.print_exc()
-            st["error"] = f"{type(e).__name__}: {e}"
+            L.error("Build failed", e)
+            st["error"] = f"{type(e).__name__}: {e} - details in the log (Mod tab > Problems > Save error report)"
         finally:
             st["running"] = False
 
@@ -1003,7 +1183,9 @@ class App:
             "sources": self.source_status,
             "mod_dirs": P.game_mod_dirs(),
             "recent": self.settings.get("recent", []),
+            "ui_open": self.settings.get("ui_open", []),
             "build": self.build_state,
+            "out_exists": os.path.isfile(self.output_path()),
             "busy": getattr(self, "busy", ""),
             "dialogs": P.native_dialog.__module__ is not None and _has_tk(),
         }
@@ -1032,7 +1214,19 @@ def _has_tk():
 
 
 SETTABLE = {"export_guides", "truck_uvset", "paint_name", "mod_name", "author", "mod_version", "code", "price", "finish", "base_color",
-            "color_locked", "metallic", "resolution", "output_dir", "description"}
+            "color_locked", "metallic", "resolution", "output_dir", "description", "template_size", "res_by_vehicle", "finish_by_vehicle", "lock_by_vehicle", "ask_overwrite"}
+
+
+def render_at_or_resize(scsgame, path, im, size):
+    try:
+        r = scsgame.render_at(path, size)
+    except Exception:
+        traceback.print_exc()
+        r = None
+    return r if r is not None else im.resize(size, Image.Resampling.LANCZOS)
+
+
+LINKS = {"kofi": "https://ko-fi.com/gokawa", "github": "https://github.com/alexgokawa/SkinForge"}
 
 
 def make_handler(app: App):
@@ -1103,7 +1297,7 @@ def make_handler(app: App):
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
             except Exception as e:
-                traceback.print_exc()
+                L.error(f"GET {self.path} failed", e)
                 return self._json({"error": str(e)}, 500)
 
         def _static(self, name):
@@ -1126,12 +1320,25 @@ def make_handler(app: App):
                 if r is not None:
                     return self._json(r)
             except (ValueError, KeyError, B.BuildError, SourceError, OSError) as e:
+                L.warn(f"POST {u.path}: {type(e).__name__}: {e}")
                 return self._json({"error": str(e)}, 400)
             except Exception as e:
-                traceback.print_exc()
+                L.error(f"POST {u.path} failed", e)
                 return self._json({"error": f"{type(e).__name__}: {e}"}, 500)
 
         def _post(self, path, q):
+            if path == "/api/log":     # errors / events from the window
+                d = self._jbody()
+                L.write("UI", str(d.get("msg", ""))[:4000])
+                return {"ok": True}
+            if path == "/api/log/open":
+                P.open_folder(L.log_dir())
+                return {"ok": True, "dir": L.log_dir()}
+            if path == "/api/log/report":
+                with app.lock:
+                    out = L.report(P.projects_dir(), app)
+                P.open_folder(out, select=True)
+                return {"ok": True, "path": out}
             if path == "/api/settings":
                 d = self._jbody()
                 with app.lock:
@@ -1141,6 +1348,25 @@ def make_handler(app: App):
                             continue
                         if k == "metallic":
                             app.project["metallic"].update(v)
+                        elif k in ("finish_by_vehicle", "lock_by_vehicle"):
+                            dv = app.project.setdefault(k, {})
+                            for tid, x in (v or {}).items():
+                                if x is None or x == "":
+                                    dv.pop(str(tid), None)   # back to the mod's setting
+                                elif k == "finish_by_vehicle":
+                                    names = [n for n in ("gloss", "metallic", "matte") if n in str(x).split("+")]
+                                    if names:
+                                        dv[str(tid)] = "+".join(names)
+                                else:
+                                    dv[str(tid)] = bool(x)
+                        elif k == "res_by_vehicle":
+                            rv = app.project.setdefault("res_by_vehicle", {})
+                            for tid, r in (v or {}).items():
+                                r = int(r or 0)
+                                if r in (2048, 4096, 8192):
+                                    rv[str(tid)] = r
+                                else:
+                                    rv.pop(str(tid), None)   # back to the project size
                         elif k == "paint_name":
                             app.set_skin_name(str(v))
                         elif k == "code":
@@ -1160,6 +1386,7 @@ def make_handler(app: App):
                             and str(d["paint_name"]).strip() and not str(d["paint_name"]).startswith("Untitled"):
                         app.rename_project(str(d["paint_name"]))
                     return {"ok": True, "project": app.view(), "project_file": app.project_file,
+                            "out_exists": os.path.isfile(app.output_path()),
                             "project_dir": app.project_dir, "recent": app.settings.get("recent", [])}
             if path == "/api/sources":
                 d = self._jbody()
@@ -1313,6 +1540,17 @@ def make_handler(app: App):
                     st = app.state()
                     st["kept"] = bool(kept)
                     return st
+            if path == "/api/ui/open":
+                # which vehicle groups are expanded in the list: kept in settings.json, because the
+                # app window gets a new port (= new browser storage) on every start
+                d = self._jbody()
+                with app.lock:
+                    cur = [x for x in app.settings.get("ui_open", []) if x != d["id"]]
+                    if d.get("open"):
+                        cur.append(d["id"])
+                    app.settings["ui_open"] = cur[-200:]
+                    app._save_settings()
+                return {"ok": True}
             if path == "/api/game":
                 d = self._jbody()
                 with app.lock:
@@ -1323,12 +1561,28 @@ def make_handler(app: App):
                 with app.lock:
                     app.load_truck(d["id"])
                     return app.state()
+            if path == "/api/scs/car":
+                d = self._jbody()
+                with app.lock:
+                    app.load_car(d["id"])
+                    return app.state()
+            if path == "/api/scs/trailer":
+                d = self._jbody()
+                with app.lock:
+                    app.load_trailer(d["id"])
+                    return app.state()
             if path == "/api/templates":
                 d = self._jbody()
                 with app.lock:
                     out, written = app.export_templates(d.get("keys", []))
                 P.open_folder(out)
                 return {"ok": True, "dir": out, "written": written}
+            if path == "/api/build/check":
+                with app.lock:
+                    r = app.check_output()
+                if r["exists"] and not r["ours"]:
+                    L.warn(f"Build target exists and isn't from this project: {r['path']} (codes {r['codes']})")
+                return r
             if path == "/api/build":
                 with app.lock:
                     app.save()
@@ -1348,6 +1602,12 @@ def make_handler(app: App):
                 with app.lock:
                     app.open_project(d["path"])
                     return app.state()
+            if path == "/api/link":     # fixed links only, opened in the default browser
+                url = LINKS.get(self._jbody().get("name"))
+                if not url:
+                    raise ValueError("unknown link")
+                webbrowser.open(url)
+                return {"ok": True}
             if path == "/api/open":
                 d = self._jbody()
                 P.open_folder(d["path"], select=d.get("select", False))
@@ -1379,6 +1639,7 @@ def serve(port: int = 0, open_window: bool = True, browser_fallback: bool = True
     httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app))
     url = f"http://127.0.0.1:{httpd.server_address[1]}/"
     print(f"SkinForge {__version__} running at {url}")
+    L.info(f"Settings: {app.settings_path} · project: {app.project_file}")
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     proc = P.launch_app_window(url) if open_window else None

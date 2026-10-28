@@ -105,18 +105,26 @@ templates itself from the game's 3D models, with labels like *BACK WALL*, *ROOF*
 
 ![Template drawn from the 3D model](docs/template.jpg)
 
-1. **Extract your game files once.** Use SCS's own extractor (see the SCS modding wiki)
-   to unpack `def.scs` and `base_vehicle.scs` into one folder. For parts from a DLC
-   (Mighty Griffin and others), also extract that DLC's `.scs` into its own subfolder
-   of the same folder.
-2. Click **SCS game files…** and pick that folder. SkinForge remembers it for each game.
-3. **SCS trailers** are listed straight away. Under **SCS trucks**, click **Load** on a
-   truck. The first load reads its models and takes about a minute; after that it's
-   cached.
-4. Each truck gets one **Cab** sheet per cab model, plus its separate parts (side
+1. **Point SkinForge at your game.** It finds your Steam install by itself. If it doesn't,
+   click **SCS game files…** and pick the game folder (e.g.
+   `...\steamapps\common\American Truck Simulator`). Nothing needs extracting: the game's
+   own archives and your DLC are read directly.
+2. Under **SCS trailers**, **SCS trucks** and (ATS) **Road Trip cars**, click **Load** on a
+   vehicle. The first load reads its models and takes a few seconds to a minute; after that
+   it's cached.
+3. **Texture size per vehicle:** the **2K / 4K / 8K** buttons above the preview set the size
+   for the selected truck, trailer or car. The Paint job tab's Texture size is the default.
+   Your artwork is scaled to that size when building - keep its shape (1:1, 2:1) the same as
+   the template, and paint at the size you want to see (scaling up adds no detail).
+4. **Templates:** the vehicle's **Templates** button exports its templates as PNG (Slot tab >
+   Template size: same as the texture size, or 2K / 4K / 8K).
+5. Each truck gets one **Cab** sheet per cab model, plus its separate parts (side
    skirts, fenders, sun visors, mirrors…). Paint them and build as usual.
    * You get one paint job per cab you painted. The parts go with every one of them.
    * Paint only parts, and the paint job goes on every cab.
+
+**This truck / trailer / car · paint job** (Slot tab): give one vehicle its own finish
+(Gloss / Metallic / Matte) and colour lock. Everything else follows the Paint job tab.
 
 **Mod trucks and trailers without templates** (from open packs) get templates drawn
 the same way. They show under **Mod trucks** and **Mod trailers**. Add the vehicle's
@@ -156,7 +164,8 @@ replaces the one in the Paint job tab. **Color** resets it to the Paint job tab 
 | "Locked pack (SCS# format)" | The author locked that pack. Use their Open Definition instead |
 | "No paintable parts" | The author baked the colours into the textures, so the game can't put a skin on that vehicle |
 | "Its 3D models aren't in the loaded packs" | Add the vehicle's main .scs, not only the Open Definition |
-| SCS truck parts are missing (painted logo, MG exhaust…) | Those parts come from a DLC. Extract that DLC's .scs into a subfolder of your game-files folder |
+| SCS truck parts are missing (painted logo, MG exhaust…) | Those parts come from a DLC you don't own, or you picked extracted files instead of the game install |
+| Something went wrong | Mod tab > **Problems?** > *Save error report* and send the zip (log, settings, project - no artwork) |
 | The skin doesn't show in game | Mod enabled? Above the vehicle mod? Game restarted after the build? |
 | The paint job isn't offered for a cab | Check **Cabs this skin goes on** in the Slot tab |
 | Pieces show up upside down in game | Mark them under **Mirrored pieces** and use the upright sheet (section 4) |

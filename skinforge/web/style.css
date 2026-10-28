@@ -188,3 +188,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .skin.sel { border-color: var(--accent); background: #262b34; }
 .skin .cnt { color: var(--faint); font-size: 11px; }
 .src .spin { flex: none; border-color: #fff3; border-top-color: var(--accent); }
+
+.vtag { color: var(--accent); font-weight: 600; }
+.support { flex: none; padding: 6px 14px 8px; background: var(--panel-2); color: var(--muted, #8a8f98); font-size: 11px; text-align: center; }
+.support .link { font-size: 11px; }

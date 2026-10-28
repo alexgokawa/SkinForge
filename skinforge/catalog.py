@@ -72,6 +72,8 @@ class Slot:
 
     @property
     def root(self):
+        if self.vroot == "car":
+            return "car"
         return "truck" if (self.kind == "truck" or self.vroot == "truck") else "trailer_owned"
 
     def to_json(self):
@@ -373,7 +375,7 @@ def _truck_name(src, tdir, tid, loader):
     return tid
 
 
-def scan(src, res: int = 4096, trucks_loaded=(), progress=None) -> list[Trailer]:
+def scan(src, res: int = 4096, trucks_loaded=(), progress=None, trailers_loaded=None, cars_loaded=()) -> list[Trailer]:
     from . import scsgame
     loader = src.read
     out = _scan_trailers(src, loader)
@@ -386,11 +388,12 @@ def scan(src, res: int = 4096, trucks_loaded=(), progress=None) -> list[Trailer]
         src = _ModsOnly(src, LayeredGame(getattr(src, "sources", [src]), None))
     own_t = {t.id for t in out}      # vehicles with an author template stay in their own group
     own = {t.id for t in trucks}
-    st = scsgame.scan(src, res, progress, skip=own_t)
+    st = scsgame.scan(src, res, progress, skip=own_t, loaded=trailers_loaded)
     sk = scsgame.scan_trucks(src, res, trucks_loaded, progress, skip=own)
     mod = lambda t: getattr(t, "vkind", "") in ("mod3d", "mod3d_truck")
+    cars = scsgame.scan_cars(src, res, cars_loaded, progress)
     return (out + trucks + [t for t in st if mod(t)] + [t for t in sk if mod(t)]
-            + [t for t in st if not mod(t)] + [t for t in sk if not mod(t)])
+            + [t for t in st if not mod(t)] + [t for t in sk if not mod(t)] + cars)
 
 
 class _ModsOnly:

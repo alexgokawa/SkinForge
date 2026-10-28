@@ -62,6 +62,56 @@ def read_pmd_materials(data: bytes, look: int = 0) -> list[str]:
     return out
 
 
+_TOKEN_CHARS = "0123456789abcdefghijklmnopqrstuvwxyz_"
+
+
+def token_str(v: int) -> str:
+    """SCS 'token' (base-38 packed name, up to 12 chars) -> text."""
+    out = ""
+    while v:
+        out += _TOKEN_CHARS[v % 38 - 1]
+        v //= 38
+    return out
+
+
+def read_pmd_variants(data: bytes) -> dict:
+    """Variant name -> [part visible?] (the 'visible' part attribute per variant). One model can
+    hold several cabs (Peterbilt 389: var_a / var_b / var_c), each showing its own parts."""
+    try:
+        (_ver, _mc, _lc, _pc, vc, partc, ac, avs, _mbs, _lo, vo, pao, avo, ao, _mo, _mdo) = \
+            struct.unpack_from("<16I", data, 0)
+        names = [token_str(struct.unpack_from("<Q", data, vo + 8 * i)[0]) for i in range(vc)]
+        links = [struct.unpack_from("<ii", data, pao + 8 * i) for i in range(partc)]
+        attrs = [(token_str(struct.unpack_from("<Q", data, ao + 16 * i)[0]),) + struct.unpack_from("<ii", data, ao + 16 * i + 8)
+                 for i in range(ac)]
+        out = {}
+        for v, name in enumerate(names):
+            vis = []
+            for f, t in links:
+                ok = True
+                for j in range(f, t):
+                    a, _typ, off = attrs[j]
+                    if a == "visible":
+                        ok = struct.unpack_from("<i", data, avo + v * avs + off)[0] != 0
+                vis.append(ok)
+            out[name] = vis
+        return out
+    except (struct.error, IndexError):
+        return {}
+
+
+def read_pmg_parts(data: bytes) -> list:
+    """[(part name, first piece, piece count)] in model order (matches the .pmd part order)."""
+    n = struct.unpack_from("<i", data, 8)[0]
+    off = struct.unpack_from("<i", data, 76)[0]
+    out = []
+    for i in range(n):
+        name = token_str(struct.unpack_from("<Q", data, off + 24 * i)[0])
+        count, first = struct.unpack_from("<ii", data, off + 24 * i + 8)
+        out.append((name, first, count))
+    return out
+
+
 _EFFECT = re.compile(rb'(?:effect|material)\s*:\s*"([^"]+)"')   # new format / older "material : "eut2..." {"
 
 

@@ -42,8 +42,8 @@
     <section class="card">
       <div class="card-h"><h2>Sources</h2><button class="link" id="findSrc">Find in mod folder</button></div>
       <div id="sources"></div>
-      <div class="row gap"><button class="small" id="browseSrc">Choose .scs…</button><button class="small" id="browseGame" title="The folder you extracted the game's def.scs and base_vehicle.scs into (SCS Extractor)">SCS game files…</button></div>
-      <p class="hint">Mod trailers/trucks: the author's <b>Open Definition</b> .scs. SCS's own trailers: your extracted <b>def</b> + <b>base_vehicle</b> folder.</p>
+      <div class="row gap"><button class="small" id="browseSrc">Choose .scs…</button><button class="small" id="browseGame" title="Your ATS / ETS2 install folder (Steam ...\common\American Truck Simulator). Found automatically when Steam is in the usual place. An extracted def + base_vehicle folder works too.">SCS game files…</button></div>
+      <p class="hint">Mod trailers/trucks: the author's <b>Open Definition</b> .scs. SCS's own trucks and trailers: read straight from your game install, no extracting.</p>
     </section>
     <div id="trailers"></div>
   </aside>
@@ -61,6 +61,11 @@
         <button data-paint="none" title="No paint: checkerboard shows exactly which parts are transparent">None</button>
         <label class="swatch" data-paint="custom" title="Try any colour a player might pick in the shop"><input type="color" id="previewColor"><span>Custom</span></label>
       </div>
+      <div class="seg" id="sizeSeg" title="Texture size of this truck / trailer / car in the mod">
+        <button data-vsize="2048">2K</button>
+        <button data-vsize="4096">4K</button>
+        <button data-vsize="8192">8K</button>
+      </div>
       <div class="spacer"></div>
       <span class="stage-title" id="stageTitle"></span>
       <button class="small ghost" id="zoomFit" title="Fit (F)">Fit</button>
@@ -72,13 +77,13 @@
         <div>
           <svg viewBox="0 0 48 48" width="44"><path d="M24 30V8m0 0l-8 8m8-8l8 8M8 30v8a2 2 0 002 2h28a2 2 0 002-2v-8" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <b>Drop your artwork here</b>
-          <span>PNG with transparency, same square size as the template</span>
+          <span>PNG with transparency, same shape as the template</span>
         </div>
       </div>
       <div class="pick-hint" id="pickHint" hidden>Click a mirrored piece · if it grabs too much, <b>drag a box</b> around the piece · <b>Esc</b> when done</div>
       <div class="empty" id="emptyStage" hidden>
         <b>Nothing loaded yet</b>
-        <span>Pick an Open Definition .scs or your extracted SCS game files on the left.</span>
+        <span>Pick an Open Definition .scs or your SCS game folder on the left.</span>
       </div>
     </div>
   </section>
@@ -93,6 +98,7 @@
     <div class="tab-body" id="tab-paint" hidden></div>
     <div class="tab-body" id="tab-mod" hidden></div>
     <div class="build-box" id="buildBox"></div>
+    <div class="support">SkinForge is free · <button class="link" data-link="kofi" title="https://ko-fi.com/gokawa">Support it on Ko-fi</button> · <button class="link" data-link="github" title="https://github.com/alexgokawa/SkinForge">GitHub</button></div>
   </aside>
 </main>
 

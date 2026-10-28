@@ -1,4 +1,5 @@
-# SkinForge 0.7.4 - ATS + ETS2, SCS trucks, multi-skin mods: trailer + truck skins, SCS's own trailers and Jon Ruda truck logos for SCS games
+# SkinForge 0.8.0 - skin builder for ATS + ETS2: SCS trucks, trailers and Road Trip cars, mod trailer packs, multi-skin mods
+
 
 Builds paint-job mods for trailer packs that ship **template paint jobs** (Jon Ruda's
 trailer pack: Great Dane gd53, Wilson hopper, livestock, Polar tanker). It reads the
@@ -15,6 +16,26 @@ trailers. That means no MS2 vehicle XMLs and no post-build patch.
 *Several skins in one mod - each with its own name and shop icon.*
 
 **New here? Read the [user guide](USER_GUIDE.md).**
+
+## What's new in 0.8.0
+
+* **Reads the game directly.** Pick your ATS / ETS2 install (found automatically through
+  Steam): SkinForge reads the game's own .scs archives, base game and DLC. No extracting.
+* **Every ATS truck.** Templates per cab for all SCS trucks, drawn from the game's 3D models,
+  with hoods, roof deflectors, side skirts, sun visors and mudflaps as their own parts.
+  Parts you leave empty take the paint colour.
+* **Road Trip cars** (ATS, Road Trip: Ford DLC): Mustang 1967, Bronco 2024, F-150 2023 and
+  Crown Victoria 2006 - one body sheet each, in the car paint shop.
+* **2K / 4K / 8K** textures, chosen per truck / trailer / car (buttons above the preview), so
+  one mod can hold an 8K truck and 4K trailers. Video memory estimate, warning at 8K.
+* **Gloss, Metallic and Matte** in any combination, each its own shop entry. Finish and colour
+  lock can be set per vehicle too (Slot tab), e.g. a matte, locked truck with gloss trailers.
+* **Template export at the size you want** (Slot tab > Template size), re-drawn from the model
+  so lines stay sharp. Left and right sides that share one place on the sheet get one label.
+* **Safer builds:** SkinForge asks before a build replaces an existing mod file, and warns
+  loudly when that file came from another project (a forgotten mod name).
+* **Log + error report:** Mod tab > Problems? saves one zip (log, settings, project - no
+  artwork) to send along when something goes wrong.
 
 ## Download
 
@@ -119,10 +140,11 @@ sources (mod packs + extracted game files), and the output goes to that game's m
 SkinForge remembers your extracted game files per game, so new projects are ready to paint.
 Skins are built the same way in both games.
 
-## SCS's own trucks (0.6, ETS2 Scania S first)
+## SCS's own trucks (0.6, game install since 0.8)
 
-1. Add your extracted game files (*SCS game files…*). For ETS2 that is the folder holding
-   `game files\def` and `base_vehicle` (a `def` folder next to `base_vehicle` works too).
+1. Click *SCS game files…* and pick your game install folder (since 0.8 SkinForge finds the
+   Steam install itself). Extracted game files still work: the folder holding `def` and
+   `base_vehicle`.
 2. Under **SCS trucks** every truck is listed. Click **Load** on the one you want: SkinForge
    reads its cabs and parts once (a minute the first time on a cloud drive, then cached).
 3. Slots per truck:
@@ -133,8 +155,8 @@ Skins are built the same way in both games.
 4. Build: like SCS's own liveries, one paint job per cab you painted (pointed at that cab), all
    sharing the parts. Paint only parts and the paint job goes on every cab.
 
-ATS trucks: their definitions and models are not in def.scs / base_vehicle.scs - once their
-archive is extracted into the same folder they show up the same way.
+ATS trucks live in their DLC archives (`dlc_kenworth_w900.scs`, ...); reading the install
+mounts every one you own.
 
 ## Mod trucks with painted parts + "Your logo" textures (0.7)
 
@@ -284,3 +306,8 @@ SCS base-game trailers (0.5): model-template method proven in game with the box 
 ## License
 
 MIT - see `LICENSE`. Not affiliated with SCS Software.
+
+## Support
+
+SkinForge is free and open source. If it saves you time, you can buy me a coffee on
+[Ko-fi](https://ko-fi.com/gokawa) - it helps me keep building tools for the ATS / ETS2 community.

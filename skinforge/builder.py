@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import struct
 import json
 import os
 import re
@@ -26,7 +27,7 @@ DEFAULT_PROJECT = {
     "mod_version": "1.0",
     "code": "skin",
     "price": 1000,
-    "finish": "both",            # gloss | metallic | both
+    "finish": "both",            # gloss | metallic | matte joined by "+" ("both" = gloss+metallic)
     "base_color": "#9a9a9a",
     "color_locked": False,
     "metallic": {
@@ -38,6 +39,10 @@ DEFAULT_PROJECT = {
         "flake_clearcoat_rolloff": 5.0,
     },
     "resolution": 4096,
+    "res_by_vehicle": {},
+    "finish_by_vehicle": {},      # id -> "gloss+matte" etc. (overrides "finish")
+    "lock_by_vehicle": {},        # id -> true / false (overrides "color_locked")         # truck / trailer / car id -> 2048 / 4096 / 8192 (overrides "resolution")
+    "template_size": "",         # template export size: "" = texture size, or 2048 / 4096 / 8192
     "truck_uvset": "normal",     # normal | both (also ship alternate-UV-set units for trucks)
     "sources": [],
     "output_dir": "",
@@ -228,6 +233,27 @@ def _fit(im: Image.Image, w: int, h: int) -> Image.Image:
     return im.crop((x, y, x + w, y + h))
 
 
+FIN_SUFFIX = {"g": "", "m": "m", "t": "t"}          # unit token suffix per finish
+FIN_NAME = {"g": "", "m": " Metallic", "t": " Matte"}
+MATTE_TOBJ = "/vehicle/truck/upgrade/paintjob/skinforge_matte.tobj"   # shared by every SkinForge mod (same content)
+
+
+def finish_codes(p) -> list:
+    """Project finish ("gloss", "metallic", "matte", "both" or e.g. "gloss+matte") -> ["g", "m", "t"] subset."""
+    f = str(p.get("finish") or "both").lower()
+    names = {"gloss", "metallic"} if f == "both" else set(f.split("+"))
+    out = [c for n, c in (("gloss", "g"), ("metallic", "m"), ("matte", "t")) if n in names]
+    return out or ["g", "m"]
+
+
+def matte_dds() -> bytes:
+    """4x4 uncompressed A8R8G8B8, every pixel white with alpha 0 (byte-identical to MS2's matte.dds)."""
+    hdr = struct.pack("<4s7I", b"DDS ", 124, 0x100F, 4, 4, 16, 0, 0) + b"\0" * 44
+    hdr += struct.pack("<2I4s5I", 32, 0x41, b"\0\0\0\0", 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000)
+    hdr += struct.pack("<5I", 0x1000, 0, 0, 0, 0)
+    return hdr + b"\xff\xff\xff\x00" * 16
+
+
 # --- build -------------------------------------------------------------------
 def build(project: dict, project_dir: str, trailers: list, out_path: str, progress=None,
           compose=None) -> BuildResult:
@@ -246,7 +272,29 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
     tex_cache: dict[str, str] = {}   # art hash -> dds game path
     units = []
 
-    finishes = {"gloss": ["g"], "metallic": ["m"], "both": ["g", "m"]}[p.get("finish", "both")]
+    finishes = finish_codes(p)
+    fin_by_vehicle = {k: v for k, v in (p.get("finish_by_vehicle") or {}).items() if v}
+    lock_by_vehicle = {k: bool(v) for k, v in (p.get("lock_by_vehicle") or {}).items() if v is not None}
+
+    def fins_of(tid):
+        """Finishes of one truck / trailer / car: its own choice, else the mod's."""
+        v = fin_by_vehicle.get(tid)
+        return finish_codes({"finish": v}) if v else finishes
+
+    def locked_of(tid):
+        return lock_by_vehicle.get(tid, bool(p.get("color_locked")))
+    matte_used = []
+    by_vehicle = {k: int(v) for k, v in (p.get("res_by_vehicle") or {}).items() if v and T.is_pot(int(v))}
+
+    def vres(tid):
+        """Texture size of one truck / trailer / car: its own choice, else the project's."""
+        return by_vehicle.get(tid, res)
+
+    def vsize(tid, size):
+        """An SCS part's texture size (scanned at the project size) at this vehicle's size."""
+        w, h = size or (res, res)
+        f = vres(tid) / res
+        return (max(4, int(w * f)), max(4, int(h * f)))
 
     def say(msg):
         if progress:
@@ -255,16 +303,17 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
     def art_path(rel):
         return os.path.join(project_dir, rel) if rel and not os.path.isabs(rel) else rel
 
-    def make_texture(rel_art, game_dir, stem, key=None, size=None, sid="") -> str:
+    def make_texture(rel_art, game_dir, stem, key=None, size=None, sid="", lres=None) -> str:
+        lres = lres or res
         fp = art_path(rel_art)
         with open(fp, "rb") as f:
             raw = f.read()
         sig = compose[0](key, sid) if (compose and key) else ""
-        h = hashlib.sha1(raw + str(res).encode() + sig.encode() + str(size).encode()).hexdigest()
+        h = hashlib.sha1(raw + str(lres).encode() + sig.encode() + str(size).encode()).hexdigest()
         if h in tex_cache:
             return tex_cache[h]
         im = T.load_image(raw)
-        out_size = tuple(size) if size else pot_size(im.size, res)
+        out_size = tuple(size) if size else pot_size(im.size, lres)
         w, hh = im.size
         if abs((w / hh) - (out_size[0] / out_size[1])) > 0.02 * (out_size[0] / out_size[1]):
             warnings.append(f"{os.path.basename(fp)} is {w}x{hh} - stretched to {out_size[0]}x{out_size[1]} "
@@ -323,21 +372,34 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
             "\tstock: false",
             f"\talternate_uvset: {'true' if alt_uv else 'false'}",
             f"\tbase_color: {sii_color(color or p['base_color'])}",
-            f"\tbase_color_locked: {'true' if p.get('color_locked') else 'false'}",
+            f"\tbase_color_locked: {'true' if locked_of(slot.trailer) else 'false'}",
         ]
+        if fin == "t":
+            matte_used.append(token)
+            # matte: a white base texture with alpha 0 kills the gloss. No flake/flip layer: with
+            # flipflake on, the engine's default flip colour bled in (white -> salmon red, light
+            # colours tinted - dev9 test). MS2's template ends up the same way: its metallic.sui
+            # @include comes after the matte lines and sets flipflake to the metallic switch (off)
+            body += [
+                f'\tbase_texture_override: "{MATTE_TOBJ}"',
+                "\tflipflake: false",
+            ]
         if fin == "m":
             body += [
                 "\tflipflake: true",
                 f"\tflake_color: {sii_color(metallic['flake_color'])}",
-                "\tflake_color_locked: false",
+                f"\tflake_color_locked: {'true' if locked_of(slot.trailer) else 'false'}",
                 f"\tflip_color: {sii_color(metallic['flip_color'])}",
-                "\tflip_color_locked: false",
+                f"\tflip_color_locked: {'true' if locked_of(slot.trailer) else 'false'}",   # a locked paint job locks every colour
                 f"\tflip_strength: {float(metallic['flip_strength']):.3f}",
                 f"\tflake_density: {float(metallic['flake_density']):.3f}",
                 f"\tflake_shininess: {float(metallic['flake_shininess']):.3f}",
                 f"\tflake_clearcoat_rolloff: {float(metallic['flake_clearcoat_rolloff']):.3f}",
                 '\tflake_noise: "/material/custom/flake_noise.tobj"',
             ]
+            if getattr(slot, "vroot", "") == "car":
+                # SCS's own Road Trip metallics: flakes on the car's other UV set, scale 20
+                body += ["\talternate_flipflake_uvset: true", "\tflake_uvscale: 20.0"]
         if scs:
             body.append('\tpart_type: "aftermarket"')
         body.append(f'\tpaint_job_mask: "{mask_tobj}"')
@@ -426,7 +488,7 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
             n = assign_id(p, pre + key)
             game_dir = f"/vehicle/{slot.root}/upgrade/paintjob/{slot.trailer}/{code}"
             if cfg.get("art"):
-                mask = make_texture(cfg["art"], game_dir, f"{n:02d}", key, sid=sid)
+                mask = make_texture(cfg["art"], game_dir, f"{n:02d}", key, sid=sid, lres=vres(slot.trailer))
             else:
                 if not any((cfg.get("overrides") or {}).values()):
                     warnings.append(f"{sname}: {slot.trailer} {slot.label}: no artwork, but it shipped before - "
@@ -440,7 +502,8 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
                 if not rel and o.template_mask:
                     rel = shared_ovr.get((slot.trailer, o.template_mask.lower()))
                 stem = re.sub(r"[^a-z0-9_]", "_", (o.template_mask or f"o{o.index}").rsplit("/", 1)[-1].rsplit(".", 1)[0].lower())
-                omask = make_texture(rel, game_dir, f"{sid + '_' if sid else ''}part_{stem}") if rel else blank_texture(game_dir)
+                omask = make_texture(rel, game_dir, f"{sid + '_' if sid else ''}part_{stem}", lres=vres(slot.trailer)) \
+                    if rel else blank_texture(game_dir)
                 lines = ["simple_paint_job_data : .ovr%d" % len(ovr_blocks), "{",
                          f'\tpaint_job_mask: "{omask[:-4]}.tobj"']
                 lines += [f'\tacc_list[]: "{a}"' for a in o.acc_list]
@@ -456,13 +519,14 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
 
             uv_variants = [False] + ([True] if (uv_both and slot.kind == "truck") else [])
             for alt_uv in uv_variants:
-                for fin in finishes:
-                    token = f"{code}{n:02d}{'m' if fin == 'm' else ''}{'u' if alt_uv else ''}"
+                vfins = fins_of(slot.trailer)
+                for fin in vfins:
+                    token = f"{code}{n:02d}{FIN_SUFFIX[fin]}{'u' if alt_uv else ''}"
                     if len(token) > 12:
                         raise BuildError(f"Unit token {token} longer than 12 characters")
                     name = sname
-                    if len(finishes) > 1 and fin == "m":
-                        name += " Metallic"
+                    if len(vfins) > 1 and fin != "g":
+                        name += FIN_NAME[fin]
                     if alt_uv:
                         name += " (Alt UV)"
                     files[pj_path(slot, token)] = unit_text(slot, token, name, fin, alt_uv, mask_tobj, icon=icon,
@@ -496,19 +560,27 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
             root_dir = f"/vehicle/{all_parts[0].root}/upgrade/paintjob/{tid.replace('.', '_')}/{code}{first:02d}"
             blocks = []
             main_trailer = None
+            part_art = False
             for sl in parts:
                 rel = cfg_of(sl.key).get("art")
-                if not rel:
+                size = vsize(tid, sl.tex_size)
+                if rel:
+                    dds = make_texture(rel, root_dir, sl.token, sl.key, size, sid=sid)
+                    part_art = part_art or not sl.main
+                elif sl.main:
                     continue
-                size = sl.tex_size or (res, res)
-                dds = make_texture(rel, root_dir, sl.token, sl.key, size, sid=sid)
+                else:
+                    # a part left empty still gets its own (blank) texture: without an override it
+                    # samples the cab sheet at its own UVs and shows bits of the cab art (Mack
+                    # Anthem roof deflector). Blank = the paint job's base colour, like SCS's plain parts
+                    dds = blank_texture(root_dir)
                 if sl.main:
                     main_trailer = dds
                     continue
                 nw, nh = sl.native or size
                 # SCS's own numbers: trailer parts 10 x texture width (box rew_xm22), truck parts
                 # width / 64 (Scania S log_0: mirror 256 -> 4, skirt 512 -> 8, fender 1024 -> 16)
-                uvs = nw / 64.0 if sl.vroot == "truck" else 10.0 * nw
+                uvs = nw / 64.0 if sl.vroot in ("truck", "car") else 10.0 * nw
                 lines = ["simple_paint_job_data : .ovr%d" % len(blocks), "{",
                          f'\tpaint_job_mask: "{dds[:-4]}.tobj"',
                          f"\tflake_uvscale: {uvs:.6f}"]
@@ -523,18 +595,21 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
                 anchor = cab or all_parts[0]
                 if cab is not None:
                     rel = cfg_of(cab.key).get("art")
-                    main = make_texture(rel, root_dir, cab.token, cab.key, cab.tex_size or (res, res), sid=sid) \
+                    main = make_texture(rel, root_dir, cab.token, cab.key, vsize(tid, cab.tex_size), sid=sid) \
                         if rel else blank_texture(root_dir)
                 else:
                     main = main_trailer or blank_texture(root_dir)
-                if not blocks and main.endswith("/blank.dds"):
+                if not part_art and main.endswith("/blank.dds"):
                     warnings.append(f"{sname}: {tid}{' ' + cab.label if cab else ''}: no artwork, but it shipped "
                                     f"before - kept as plain colour so existing saves don't crash")
                 per_key[pre + ukey] = (anchor, main[:-4] + ".tobj", ovr_text, sk, color)
-                for fin in finishes:
-                    token = f"{code}{n:02d}{'m' if fin == 'm' else ''}"
-                    name = sname + (" Metallic" if len(finishes) > 1 and fin == "m" else "")
-                    files[pj_path(anchor, token)] = unit_text(anchor, token, name, fin, False, main[:-4] + ".tobj",
+                vfins = fins_of(tid)
+                for fin in vfins:
+                    token = f"{code}{n:02d}{FIN_SUFFIX[fin]}"
+                    name = sname + (FIN_NAME[fin] if len(vfins) > 1 and fin != "g" else "")
+                    files[pj_path(anchor, token)] = unit_text(anchor, token, name, fin,
+                                                              bool(cab is not None and getattr(cab, "alt_uv", False)),
+                                                              main[:-4] + ".tobj",
                                                               scs=True, icon=icon, color=color)
                     if ovr_text:
                         files[pj_path(anchor, token, acc=True)] = ovr_text
@@ -544,20 +619,35 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
 
     # variants (finish / alt UV) that shipped before but are switched off now: keep them alive
     emitted = {u["token"] for u in units}
+    kept_alive = []
     for token, key in list(built.items()):
         if token in emitted or key not in per_key:
             continue
         slot, mask_tobj, ovr_text, sk, kcolor = per_key[key]
-        fin = "m" if "m" in re.sub(r"^[a-z0-9_]*?\d+", "", token[len(code):]) else "g"
+        suffix = re.sub(r"^[a-z0-9_]*?\d+", "", token[len(code):])
+        fin = "m" if "m" in suffix else "t" if "t" in suffix else "g"
         alt_uv = token.endswith("u")
         sid = sk["id"]
-        files[pj_path(slot, token)] = unit_text(slot, token, (sk.get("name") or "Skin") + (" Metallic" if fin == "m" else "")
+        files[pj_path(slot, token)] = unit_text(slot, token, (sk.get("name") or "Skin") + (FIN_NAME[fin] if fin != "g" else "")
                                                 + (" (Alt UV)" if alt_uv else ""), fin, alt_uv, mask_tobj,
                                                 scs=split(key)[1].startswith("@scs/"), icon=code if not sid else f"{code}_{sid}",
                                                 color=kcolor)
         if ovr_text:
             files[pj_path(slot, token, acc=True)] = ovr_text
-        warnings.append(f"{token}: variant turned off but it shipped before - kept for save compatibility")
+        kept_alive.append((fin, alt_uv, token))
+
+    if kept_alive:   # one note per finish, not one per paint job
+        for what in ("Gloss", "Metallic", "Matte", "Alt UV"):
+            toks = [t for f, alt, t in kept_alive if (what == "Alt UV" and alt) or
+                    (not alt and {"g": "Gloss", "m": "Metallic", "t": "Matte"}[f] == what)]
+            if toks:
+                warnings.append(f"{what} is switched off, but {len(toks)} {what.lower()} paint job"
+                                f"{'s' if len(toks) > 1 else ''} shipped in an earlier build - kept in the mod "
+                                f"so saved games that use them don't break ({', '.join(toks[:4])}"
+                                f"{', …' if len(toks) > 4 else ''})")
+    if matte_used:   # one flat base texture for every matte paint job in the mod
+        files[MATTE_TOBJ[:-5] + ".dds"] = matte_dds()
+        files[MATTE_TOBJ] = T.make_tobj(MATTE_TOBJ[:-5] + ".dds")
 
     # icon per skin (paint job list) + mod manager icon
     first = live[0] if live else p["skins"][0]

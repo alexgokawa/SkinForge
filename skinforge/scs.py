@@ -52,8 +52,7 @@ class Source:
         if self.kind in ("zip", "folder"):
             self._index = _unpackage(raw)
         elif self.kind == "hashfs":
-            raise SourceError("Locked pack (SCS# format) - SkinForge only reads open packs. Use the mod's "
-                              "Open Definition, or ask the author for an unlocked version")
+            raise SourceError("HashFS archive (SCS#) - not readable; use the mod's Open Definition / ZIP version")
         else:
             raise SourceError("Not a ZIP .scs archive or folder")
 
@@ -180,7 +179,11 @@ def is_game_folder(path: str) -> bool:
 
 
 def game_root_for(path: str) -> str | None:
-    """The user may pick the extract folder itself, or one of its subfolders (def, base_vehicle)."""
+    """The user may pick the game install folder, the extract folder itself, or one of its
+    subfolders (def, base_vehicle)."""
+    from .scsarchive import is_game_install
+    if is_game_install(path):
+        return path
     if is_game_folder(path):
         return path
     parent = os.path.dirname(os.path.normpath(path))
@@ -285,9 +288,160 @@ class GameSource:
         pass
 
 
+class HashFSSource:
+    """A HashFS (SCS#) archive: base-game archives and locked mods (Jon Ruda's main packs).
+    Files are read by path; listings only where the archive kept them."""
+
+    kind = "hashfs"
+
+    def __init__(self, path: str):
+        try:
+            from .hashfs import HashFS, HashFSError
+        except ImportError:   # public build: no reader for locked mod packs
+            raise SourceError("Locked pack (SCS# format) - SkinForge only reads open packs. Use the mod's "
+                              "Open Definition, or ask the author for an unlocked version")
+        try:
+            self._h = HashFS(path)
+        except HashFSError as e:
+            raise SourceError(str(e))
+        self.path = path
+        self._files = None
+        self._dirs: dict = {}
+
+    @property
+    def name(self) -> str:
+        return os.path.basename(self.path.rstrip("/\\"))
+
+    def _norm(self, p):
+        return p.replace("\\", "/").strip("/").lower()
+
+    def exists(self, p: str) -> bool:
+        if p.lower().startswith(VIRTUAL):
+            return p.lower() in VIRTUAL_FILES
+        return self._h.exists(self._norm(p))
+
+    def read(self, p: str):
+        if p.lower().startswith(VIRTUAL):
+            return read_virtual(p)
+        return self._h.read(self._norm(p))
+
+    def stat(self, p: str):
+        return self._h.stat(self._norm(p))
+
+    def listdir(self, d: str):
+        k = self._norm(d)
+        if k not in self._dirs:
+            names = self._h.listdir(k)
+            self._dirs[k] = [n for n in names if _plain_name(n)]   # locked packs add junk names
+        return self._dirs[k]
+
+    def files(self):
+        """Walk the listings that exist (def/ and vehicle/ - what SkinForge scans)."""
+        if self._files is None:
+            out = []
+            stack = [x for x in ("def", "vehicle") if self._h._entry(x)]
+            seen = set()
+            while stack and len(out) < 200000:
+                d = stack.pop()
+                if d in seen:
+                    continue
+                seen.add(d)
+                for n in self.listdir(d):
+                    full = f"{d}/{n}"
+                    if n.endswith("/"):
+                        stack.append(full[:-1])
+                    else:
+                        out.append("/" + full)
+            self._files = out
+        return self._files
+
+    def close(self):
+        self._h.close()
+
+
+class GameInstallSource:
+    """The game install folder itself (Steam ...\\common\\American Truck Simulator): the SCS archives
+    are read in place, no extraction. Every archive SkinForge needs is mounted as the game does it
+    (DLC over base), so the user sees exactly the trucks, trailers and AI vehicles they own."""
+
+    kind = "game"
+
+    def __init__(self, path: str, progress=None):
+        from .scsarchive import ArchiveError, HashFS2, archive_order
+        self.path = path
+        self.archives = []
+        self.skipped = []
+        for fp in archive_order(path):
+            if progress:
+                progress(f"Opening {os.path.basename(fp)}…")
+            try:
+                self.archives.append(HashFS2(fp))
+            except (ArchiveError, OSError, ValueError) as e:
+                self.skipped.append((os.path.basename(fp), str(e)))
+        if not self.archives:
+            raise SourceError("No readable SCS archives in this folder" +
+                              (f" ({self.skipped[0][1]})" if self.skipped else ""))
+        self._dirs: dict = {}
+        self.game = self
+
+    @property
+    def name(self) -> str:
+        return os.path.basename(self.path.rstrip("/\\"))
+
+    def register_virtual(self, path: str, make):
+        register_virtual(path, make)
+
+    def _arc(self, p):
+        for a in self.archives:
+            if a.exists(p):
+                return a
+        return None
+
+    def exists(self, p: str) -> bool:
+        if p.lower().startswith(VIRTUAL):
+            return p.lower() in VIRTUAL_FILES
+        return self._arc(p) is not None
+
+    def read(self, p: str):
+        if p.lower().startswith(VIRTUAL):
+            return read_virtual(p)
+        a = self._arc(p)
+        return a.read(p) if a is not None else None
+
+    def stat(self, p: str):
+        a = self._arc(p)
+        return a.stat(p) if a is not None else None
+
+    def listdir(self, d: str):
+        k = d.replace("\\", "/").strip("/").lower()
+        if k not in self._dirs:
+            out = set()
+            for a in self.archives:
+                out.update(a.listdir(k))
+            self._dirs[k] = sorted(out)
+        return self._dirs[k]
+
+    def files(self):
+        return iter(())
+
+    def close(self):
+        for a in self.archives:
+            a.close()
+
+
+def _plain_name(n: str) -> bool:
+    import re
+    return bool(re.fullmatch(r"[a-z0-9_.\-+ ]+/?", n)) and not n.startswith(" ")
+
+
 def open_source(path: str):
+    from .scsarchive import is_game_install
+    if os.path.isdir(path) and is_game_install(path):
+        return GameInstallSource(path)
     if os.path.isdir(path) and game_root_for(path):
         return GameSource(path)
+    if archive_kind(path) == "hashfs":
+        return HashFSSource(path)
     return Source(path)
 
 
