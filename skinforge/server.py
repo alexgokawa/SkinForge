@@ -418,7 +418,12 @@ class App:
                         has_def = any(n.startswith(("def/vehicle/trailer_owned/", "def/vehicle/truck/"))
                                       and "/paint_job/" in n for n in names)
                         has_tmpl = any(TEMPLATE_RE.search(n.lower()) for n in names)
-                        if has_def and has_tmpl:
+                        # a vehicle mod / open definition also defines the vehicle (cabin, chassis,
+                        # body...); a skin pack only adds paint jobs - not a source
+                        has_vehicle = any(re.match(r"def/vehicle/(?:trailer_owned|truck)/[^/]+/(?!paint_job/)[^/]+/.+\.sii$", n)
+                                          or re.match(r"def/vehicle/trailer_owned/[^/]+/(?!paint_job/)[^/]+\.sii$", n)
+                                          for n in names)
+                        if has_def and has_tmpl and has_vehicle:
                             found.append(fp)
                 except Exception:
                     continue
