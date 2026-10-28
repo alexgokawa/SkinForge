@@ -5,6 +5,12 @@ trailer pack: Great Dane gd53, Wilson hopper, livestock, Polar tanker). It reads
 pack's own definitions, so the paint jobs it writes match how the author made the
 trailers. That means no MS2 vehicle XMLs and no post-build patch.
 
+![SCS Scania S skin built with SkinForge, in game](docs/in_game.jpg)
+
+| Your artwork on the template | Templates drawn from SCS's own 3D models |
+|---|---|
+| ![Preview](docs/preview.jpg) | ![Template](docs/template.jpg) |
+
 ## Download
 
 Grab `SkinForge.exe` from the [Releases](../../releases) page - one file, nothing to install.
