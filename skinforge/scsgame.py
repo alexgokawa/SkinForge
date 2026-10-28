@@ -24,7 +24,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from . import sii
 from .pmg import ModelError, is_paintable, mat_effect, read_pmd_materials, read_pmd_variants, read_pmg, read_pmg_parts
 
-TEMPLATE_VERSION = 17
+TEMPLATE_VERSION = 18
 DENSITY = 256            # px per metre at "native" size (= SCS's own 53' box body: 4096 px over 16 m)
 MERGE_IOU = 0.97
 MIN_SIDE = 64
