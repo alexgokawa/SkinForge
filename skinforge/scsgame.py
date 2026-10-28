@@ -686,7 +686,34 @@ def face_labels(g: Group):
             if g.slot == "cabin" and key == "+y" and _is_hood(ts, bb, N, zr):
                 label = text.replace("ROOF", "HOOD")   # Volvo VNL / Cascadia: hood is part of the cab
             out.append(((bb[0] / N, bb[1] / N, bb[2] / N, bb[3] / N), label, notes, area))
-    return [o[:3] for o in _merge_mirrored(out)]
+    return [o[:3] for o in _drop_stacked(_merge_mirrored(out))]
+
+
+def _drop_stacked(labels):
+    """Faces mapped on top of each other (ATS dumper live floor: sides, roof edge and underside
+    all on one strip) -> the biggest face keeps the label and names the others, instead of
+    four labels printed over each other."""
+    def inter(a, b):
+        ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+        iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+        return ix * iy
+    kept = []
+    for bb, text, notes, area in sorted(labels, key=lambda r: -r[3]):
+        own = (bb[2] - bb[0]) * (bb[3] - bb[1])
+        for k in kept:
+            if own > 0 and inter(bb, k[0]) / own > 0.5:
+                name = re.sub(r"[<>]|\bFRONT\b", "", text).strip()
+                if name and name not in k[4]:
+                    k[4].append(name)
+                break
+        else:
+            kept.append([bb, text, list(notes), area, []])
+    out = []
+    for bb, text, notes, area, also in kept:
+        if also:
+            notes = notes + ["also on this area: " + ", ".join(also)]
+        out.append((bb, text, notes, area))
+    return out
 
 
 def _box_iou(a, b):
@@ -1136,6 +1163,61 @@ def scs_part_sheets(game, tid, vroot="trailer_owned"):
     return {a: max(v, key=v.get) for a, v in votes.items()}
 
 
+def scs_sheet_blocks(game, tid, vroot="trailer_owned"):
+    """The acc_list sets SCS's own liveries paint from one atlas mask (solid shared_ masks
+    left out): parts in one set share one sheet - food tank 53' body + 53' chassis."""
+    root = f"/def/vehicle/{vroot}/{tid}/paint_job/accessory"
+    blocks = []
+    for fn in game.listdir(root):
+        if fn.endswith("/") or not fn.endswith(".sii"):
+            continue
+        data = game.read(f"{root}/{fn}")
+        if not data:
+            continue
+        text = data.decode("utf-8", "replace")
+        for mask, body in re.findall(r'paint_job_mask\s*:\s*"([^"]+)"(.*?)\}', text, re.S):
+            if "/shared_" in mask:
+                continue
+            accs = frozenset(re.findall(r'acc_list\[\]\s*:\s*"([^"]+)"', body))
+            if accs:
+                blocks.append(accs)
+    return blocks
+
+
+def _merge_shared_sheets(groups, blocks):
+    """Groups SCS paints from one mask become one slot on the bigger group's sheet (the chassis
+    bits sit in a corner of the tank's layout). Needs the pair together in most liveries."""
+    if not blocks:
+        return groups
+    seen, together = {}, {}
+    for b in blocks:
+        for a in b:
+            seen[a] = seen.get(a, 0) + 1
+            for c in b:
+                if c != a:
+                    together[(a, c)] = together.get((a, c), 0) + 1
+    out = list(groups)
+    changed = True
+    while changed:
+        changed = False
+        for big in sorted(out, key=lambda g: -(g.native[0] * g.native[1])):
+            for small in out:
+                if small is big or small.native[0] * small.native[1] > big.native[0] * big.native[1]:
+                    continue
+                accs = [p.acc for p in small.parts]
+                ok = accs and all(seen.get(a) and max((together.get((a, p.acc), 0) for p in big.parts),
+                                                       default=0) * 2 >= seen[a] for a in accs)
+                if ok:
+                    big.parts += small.parts
+                    big.layouts += small.layouts
+                    out.remove(small)
+                    changed = True
+                    break
+            if changed:
+                break
+    return out
+
+
 def scan_trailer(game, tid, res, progress=None):
     """Slots of one trailer (SCS's own or a mod trailer without an author template), drawn from
     its 3D models. Returns a Trailer (no slots when nothing on it is paintable)."""
@@ -1148,11 +1230,16 @@ def scan_trailer(game, tid, res, progress=None):
         groups = group_parts(scan_parts(game, tid))
     except Exception:
         groups = []
+    if not mod:
+        try:
+            groups = _merge_shared_sheets(groups, scs_sheet_blocks(game, tid))
+        except Exception:
+            pass
     groups.sort(key=_sort_key)
     base_labels = [group_label(g) for g in groups]
     labels = list(base_labels)
     for i, g in enumerate(groups):
-        if base_labels.count(base_labels[i]) > 1:
+        if base_labels.count(base_labels[i]) > 1 or len(_length(g.names)) > 1:
             labels[i] += " · " + ", ".join(dict.fromkeys(part_name(p) for p in g.parts))
     sheets = {} if mod else scs_part_sheets(game, tid)
     slots = []
