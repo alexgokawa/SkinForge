@@ -24,7 +24,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from . import sii
 from .pmg import ModelError, is_paintable, mat_effect, read_pmd_materials, read_pmd_variants, read_pmg, read_pmg_parts
 
-TEMPLATE_VERSION = 18
+TEMPLATE_VERSION = 19
 DENSITY = 256            # px per metre at "native" size (= SCS's own 53' box body: 4096 px over 16 m)
 MERGE_IOU = 0.97
 MIN_SIDE = 64
@@ -1203,6 +1203,10 @@ def _merge_shared_sheets(groups, blocks):
         for big in sorted(out, key=lambda g: -(g.native[0] * g.native[1])):
             for small in out:
                 if small is big or small.native[0] * small.native[1] > big.native[0] * big.native[1]:
+                    continue
+                # only a chassis painted from its body's sheet (food tank 53' / 48'); parts of one
+                # kind sharing a mask (dumper live floors, chassis lengths) keep their own slots
+                if big.slot != "body" or small.slot != "chassis":
                     continue
                 accs = [p.acc for p in small.parts]
                 ok = accs and all(seen.get(a) and max((together.get((a, p.acc), 0) for p in big.parts),
