@@ -11,6 +11,9 @@ trailers. That means no MS2 vehicle XMLs and no post-build patch.
 |---|---|
 | ![Preview](docs/preview.jpg) | ![Template](docs/template.jpg) |
 
+![Several skins in one mod](docs/skins.jpg)  
+*Several skins in one mod - each with its own name and shop icon.*
+
 ## Download
 
 Grab `SkinForge.exe` from the [Releases](../../releases) page - one file, nothing to install.
