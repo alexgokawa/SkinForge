@@ -1,4 +1,4 @@
-# SkinForge 0.8.0 - skin builder for ATS + ETS2: SCS trucks, trailers and Road Trip cars, mod trailer packs, multi-skin mods
+# SkinForge 0.8.1 - skin builder for ATS + ETS2: SCS trucks, trailers and Road Trip cars, mod trailer packs, multi-skin mods
 
 
 Builds paint-job mods for trailer packs that ship **template paint jobs** (Jon Ruda's
@@ -16,6 +16,16 @@ trailers. That means no MS2 vehicle XMLs and no post-build patch.
 *Several skins in one mod - each with its own name and shop icon.*
 
 **New here? Read the [user guide](USER_GUIDE.md).**
+
+## What's new in 0.8.1
+
+* **Game files stay in every project.** A new project copied the open project's sources, so
+  one project that lost its game folder passed that on. Projects now always get the detected
+  install back (unless you removed it yourself), and duplicate sources are dropped.
+* **Skin packs aren't collected as sources.** Only mods that define the vehicle (open
+  definitions, trailer mods) are picked up from your mod folder.
+* **Own slot for cabs that share a sheet.** The Freightshaker Coronado SD's day cab now has its
+  own Day slots with its own template, instead of hiding under 70mid.
 
 ## What's new in 0.8.0
 
