@@ -338,6 +338,36 @@ class App:
         p["sources"] = [found if s == gone[0] else s for s in srcs if s not in gone[1:]]
         self.save()
 
+    @staticmethod
+    def _is_game_src(s):
+        from .scs import game_root_for
+        try:
+            return os.path.isdir(s) and bool(game_root_for(s))
+        except OSError:
+            return False
+
+    def _ensure_game_folder(self):
+        """Every project reads the game files unless the user took them out on purpose. A new
+        project copies the open project's sources, so one project that lost its game folder
+        used to pass that on to every project made after it. Also drops duplicate sources."""
+        p = self.project
+        srcs, seen = [], set()
+        for s in p.get("sources", []):
+            k = os.path.normcase(os.path.normpath(s))
+            if k not in seen:
+                seen.add(k)
+                srcs.append(s)
+        changed = len(srcs) != len(p.get("sources", []))
+        if not p.get("no_game") and not any(self._is_game_src(s) for s in srcs):
+            gf = self._game_folder(p.get("game", "ats"))
+            if gf and os.path.normcase(os.path.normpath(gf)) not in seen:
+                srcs.append(gf)
+                changed = True
+                L.info(f"Game folder added to sources: {gf}")
+        if changed:
+            p["sources"] = srcs
+            self.save()
+
     def _trailers_in_use(self):
         """SCS trailers read at start: the ones loaded before + any this project has art for."""
         p = self.project
@@ -413,6 +443,7 @@ class App:
         p = self.project
         status, ok, trailers = [], [], []
         self._replace_missing_game_folder()
+        self._ensure_game_folder()
         for s in p.get("sources", []):
             try:
                 from .scs import open_source
@@ -1391,7 +1422,13 @@ def make_handler(app: App):
             if path == "/api/sources":
                 d = self._jbody()
                 with app.lock:
+                    had_game = any(app._is_game_src(s) for s in app.project.get("sources", []))
                     app.project["sources"] = [s for s in d.get("sources", []) if s]
+                    has_game = any(app._is_game_src(s) for s in app.project["sources"])
+                    if had_game and not has_game:
+                        app.project["no_game"] = True      # removed on purpose: don't add it back
+                    elif has_game:
+                        app.project.pop("no_game", None)
                     from .scs import game_root_for
                     for sp in app.project["sources"]:
                         if os.path.isdir(sp) and game_root_for(sp):
