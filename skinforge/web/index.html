@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkinForge</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="/static/icon.png" type="image/png">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><img src="/static/icon.png" alt="" width="24" height="24" style="border-radius:5px"><span>SkinForge</span><em id="ver"></em></div>
+  <div class="proj">
+    <button class="ghost" id="projBtn" title="Project"><span id="projName">…</span><svg viewBox="0 0 10 6" width="10"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+    <div class="menu" id="projMenu" hidden>
+      <button data-act="new">New project…</button>
+      <button data-act="open">Open project…</button>
+      <button data-act="rename">Rename project…</button>
+      <button data-act="folder">Show project folder</button>
+      <div class="sep"></div>
+      <div class="menu-label">Recent</div>
+      <div id="recentList"></div>
+    </div>
+  </div>
+  <button class="small" data-act="new" title="Start a new, empty project - your current one stays saved">
+    <svg viewBox="0 0 16 16" width="13"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>New project</button>
+  <button class="small ghost" data-act="open" title="Open a saved project">Open…</button>
+  <div class="seg" id="gameSeg" title="Which game this project makes skins for: its own packs, game files and mod folder">
+    <button data-game="ats">ATS</button><button data-game="ets2">ETS2</button></div>
+  <div class="spacer"></div>
+  <span class="saved" id="savedState">Saved</span>
+  <button class="primary" id="buildTop"><svg viewBox="0 0 16 16" width="14"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="2"/></svg>Build mod</button>
+</header>
+
+<main class="layout">
+  <aside class="side">
+    <section class="card">
+      <div class="card-h"><h2>Skins in this mod</h2><button class="link" id="skinAdd" title="A new, empty skin: own name, artwork and shop icon">+ New skin</button></div>
+      <div id="skinList"></div>
+      <div class="row gap"><button class="small" id="skinDup" title="Copy this skin's artwork and icon into a new skin">Duplicate</button><button class="small" id="skinRen">Rename</button><button class="small danger" id="skinDel">Delete</button></div>
+    </section>
+    <section class="card">
+      <div class="card-h"><h2>Sources</h2><button class="link" id="findSrc">Find in mod folder</button></div>
+      <div id="sources"></div>
+      <div class="row gap"><button class="small" id="browseSrc">Choose .scs…</button><button class="small" id="browseGame" title="The folder you extracted the game's def.scs and base_vehicle.scs into (SCS Extractor)">SCS game files…</button></div>
+      <p class="hint">Mod trailers/trucks: the author's <b>Open Definition</b> .scs. SCS's own trailers: your extracted <b>def</b> + <b>base_vehicle</b> folder.</p>
+    </section>
+    <div id="trailers"></div>
+  </aside>
+
+  <section class="stage">
+    <div class="stage-bar">
+      <div class="seg" id="modeSeg">
+        <button data-mode="paint" class="on" title="Your artwork on the paint colour, with the guide lines">Preview</button>
+        <button data-mode="clean" title="What the game will show (no guide)">Clean</button>
+        <button data-mode="template" title="The author's original template">Template</button>
+        <button data-mode="upright" id="uprightBtn" hidden title="Your upright sheet: the mirrored pieces turned the right way up">Upright</button>
+      </div>
+      <div class="seg" id="paintSeg">
+        <button data-paint="default" title="Use the paint colour from the Paint job tab (clears this template's own Custom colour)">Color</button>
+        <button data-paint="none" title="No paint: checkerboard shows exactly which parts are transparent">None</button>
+        <label class="swatch" data-paint="custom" title="Try any colour a player might pick in the shop"><input type="color" id="previewColor"><span>Custom</span></label>
+      </div>
+      <div class="spacer"></div>
+      <span class="stage-title" id="stageTitle"></span>
+      <button class="small ghost" id="zoomFit" title="Fit (F)">Fit</button>
+      <button class="small ghost" id="zoom100" title="Zoom 1:1">1:1</button>
+    </div>
+    <div class="viewport" id="viewport">
+      <img id="previewImg" alt="" draggable="false">
+      <div class="drop-hint" id="dropHint" hidden>
+        <div>
+          <svg viewBox="0 0 48 48" width="44"><path d="M24 30V8m0 0l-8 8m8-8l8 8M8 30v8a2 2 0 002 2h28a2 2 0 002-2v-8" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <b>Drop your artwork here</b>
+          <span>PNG with transparency, same square size as the template</span>
+        </div>
+      </div>
+      <div class="pick-hint" id="pickHint" hidden>Click a mirrored piece · if it grabs too much, <b>drag a box</b> around the piece · <b>Esc</b> when done</div>
+      <div class="empty" id="emptyStage" hidden>
+        <b>Nothing loaded yet</b>
+        <span>Pick an Open Definition .scs or your extracted SCS game files on the left.</span>
+      </div>
+    </div>
+  </section>
+
+  <aside class="inspector">
+    <nav class="tabs" id="tabs">
+      <button data-tab="slot" class="on">Slot</button>
+      <button data-tab="paint">Paint job</button>
+      <button data-tab="mod">Mod</button>
+    </nav>
+    <div class="tab-body" id="tab-slot"></div>
+    <div class="tab-body" id="tab-paint" hidden></div>
+    <div class="tab-body" id="tab-mod" hidden></div>
+    <div class="build-box" id="buildBox"></div>
+  </aside>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+<input type="file" id="fileInput" accept="image/*,.dds,.tga,.psd" hidden>
+<script src="/static/app.js"></script>
+</body>
+</html>
