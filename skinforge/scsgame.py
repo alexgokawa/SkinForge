@@ -24,7 +24,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from . import sii
 from .pmg import ModelError, is_paintable, mat_effect, read_pmd_materials, read_pmd_variants, read_pmg, read_pmg_parts
 
-TEMPLATE_VERSION = 16
+TEMPLATE_VERSION = 17
 DENSITY = 256            # px per metre at "native" size (= SCS's own 53' box body: 4096 px over 16 m)
 MERGE_IOU = 0.97
 MIN_SIDE = 64
@@ -1112,6 +1112,30 @@ def vehicle_name(game, d, tid):
     return tid
 
 
+def scs_part_sheets(game, tid, vroot="trailer_owned"):
+    """{acc: (w, h)} - the sheet size SCS's own liveries give each part (their atlas masks are
+    named pjm_at_<x>x<y>_size_<w>x<h>.tobj). Exact, where the 3D model's texel density can't be
+    read cleanly (ATS dumper live floor: 4096x1024 sheet, chassis 2048x256)."""
+    root = f"/def/vehicle/{vroot}/{tid}/paint_job/accessory"
+    votes = {}
+    for fn in game.listdir(root):
+        if fn.endswith("/") or not fn.endswith(".sii"):
+            continue
+        data = game.read(f"{root}/{fn}")
+        if not data:
+            continue
+        text = data.decode("utf-8", "replace")
+        for mask, body in re.findall(r'paint_job_mask\s*:\s*"([^"]+)"(.*?)\}', text, re.S):
+            m = re.search(r"_size_(\d+)x(\d+)\.tobj$", mask)
+            if not m:
+                continue
+            wh = (int(m.group(1)), int(m.group(2)))
+            for acc in re.findall(r'acc_list\[\]\s*:\s*"([^"]+)"', body):
+                votes.setdefault(acc, {}).setdefault(wh, 0)
+                votes[acc][wh] += 1
+    return {a: max(v, key=v.get) for a, v in votes.items()}
+
+
 def scan_trailer(game, tid, res, progress=None):
     """Slots of one trailer (SCS's own or a mod trailer without an author template), drawn from
     its 3D models. Returns a Trailer (no slots when nothing on it is paintable)."""
@@ -1130,10 +1154,16 @@ def scan_trailer(game, tid, res, progress=None):
     for i, g in enumerate(groups):
         if base_labels.count(base_labels[i]) > 1:
             labels[i] += " · " + ", ".join(dict.fromkeys(part_name(p) for p in g.parts))
+    sheets = {} if mod else scs_part_sheets(game, tid)
     slots = []
     used = set()
     for g, label in zip(groups, labels):
         g.parts.sort(key=lambda p: (p.unit != "paint", len(p.unit), p.unit))
+        decl = [sheets[p.acc] for p in g.parts if p.acc in sheets]
+        if decl:
+            w, h = max(set(decl), key=decl.count)
+            if abs(math.log((w / h) / (g.native[0] / g.native[1]))) > math.log(1.5):
+                g.native = (min(4096, w), min(4096, h))   # SCS's own sheet shape wins
         token = re.sub(r"[^a-z0-9_]", "_", f"{g.slot}_{g.parts[0].unit}")
         while token in used:
             token += "x"
