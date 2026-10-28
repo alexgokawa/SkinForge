@@ -267,6 +267,8 @@ def _scan_trucks(src, loader):
                 if g["attrs"] is None or not alt:
                     g["attrs"] = dict(u.attrs)
         slots = []
+        used_stems = {g["mask"].rsplit("/", 1)[-1].rsplit(".", 1)[0].lower() for g in groups.values()}
+        mod_files = {}
         for g in groups.values():
             stem = g["mask"].rsplit("/", 1)[-1].rsplit(".", 1)[0]
             token = re.sub(r"[^a-z0-9_]", "_", stem.lower())
@@ -280,6 +282,20 @@ def _scan_trucks(src, loader):
                      template_attrs=g["attrs"] or {}, kind="truck")
             s.uvsets = sorted(g["uvsets"])
             s.cabin_units = sorted({u for u, n in s.targets if u in cabins})
+            # one template image shared by several cabs (Coronado SD: the day cab uses the 70mid
+            # sheet): name the other cabs too, or they look missing from the list
+            # (only when the mod ships that cab's own sheet unused, e.g. template_day_122sf.dds)
+            head, sep, rest = label.partition(" · ")
+            mdir, mstem = g["mask"].rsplit("/", 1)[0], stem.lower()
+            extra = []
+            for u in s.cabin_units:
+                c = u.split(".")[0]
+                own = mstem.replace(head.lower(), c.lower(), 1)
+                if c.lower() != head.lower() and own != mstem and own not in used_stems \
+                        and own + ".dds" in mod_files.setdefault(mdir, {f.lower() for f in src.listdir(mdir)}):
+                    extra.append(c)
+            if extra:
+                s.label = " + ".join([head] + extra) + (sep + rest if sep else "")
             fix = KNOWN_CAB_FIXES.get(s.key)
             if fix:
                 full = [f"{c}.{tid}.cabin" for c in fix]
