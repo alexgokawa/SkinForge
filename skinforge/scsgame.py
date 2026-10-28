@@ -24,7 +24,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from . import sii
 from .pmg import ModelError, is_paintable, mat_effect, read_pmd_materials, read_pmd_variants, read_pmg, read_pmg_parts
 
-TEMPLATE_VERSION = 19
+TEMPLATE_VERSION = 20
 DENSITY = 256            # px per metre at "native" size (= SCS's own 53' box body: 4096 px over 16 m)
 MERGE_IOU = 0.97
 MIN_SIDE = 64
@@ -691,8 +691,8 @@ def face_labels(g: Group):
 
 def _drop_stacked(labels):
     """Faces mapped on top of each other (ATS dumper live floor: sides, roof edge and underside
-    all on one strip) -> the biggest face keeps the label and names the others, instead of
-    four labels printed over each other."""
+    all on one strip) -> only the biggest face keeps its label, instead of four printed over
+    each other. (Naming the others in a note blew the note up across whole chassis atlases.)"""
     def inter(a, b):
         ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
         iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
@@ -710,8 +710,6 @@ def _drop_stacked(labels):
             kept.append([bb, text, list(notes), area, []])
     out = []
     for bb, text, notes, area, also in kept:
-        if also:
-            notes = notes + ["also on this area: " + ", ".join(also)]
         out.append((bb, text, notes, area))
     return out
 
