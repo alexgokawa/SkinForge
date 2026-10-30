@@ -536,7 +536,7 @@ document.addEventListener("click", async (e) => {
     await guard(async () => {
       const r = await api("/api/find_sources");
       if (!r.found.length) return toast("No pack with template paint jobs found in your mod folders", true);
-      S = await api("/api/sources", { sources: r.found }); render(); fit();
+      S = await api("/api/sources", { sources: [...r.found, ...S.project.sources.filter((x) => !/\.(scs|zip)$/i.test(x))] }); render(); fit();
       toast(`Loaded ${r.found.length} pack${r.found.length > 1 ? "s" : ""}: ${r.found.map(base).join(", ")}`);
     });
     return;
@@ -610,7 +610,7 @@ document.addEventListener("click", async (e) => {
   }
   if (t.dataset.rm !== undefined) {
     const src = S.project.sources.filter((_, i) => i !== +t.dataset.rm);
-    await guard(async () => { S = await api("/api/sources", { sources: src }); render(); });
+    await guard(async () => { S = await api("/api/sources", { sources: src, remove: true }); render(); });
     return;
   }
   if (t.dataset.tmpl) {
