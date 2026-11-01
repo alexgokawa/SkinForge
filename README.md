@@ -1,4 +1,4 @@
-# SkinForge 0.8.1 - skin builder for ATS + ETS2: SCS trucks, trailers and Road Trip cars, mod trailer packs, multi-skin mods
+# SkinForge 0.8.2 - skin builder for ATS + ETS2: SCS trucks, trailers and Road Trip cars, AI traffic, mod trailer packs, multi-skin mods
 
 
 Builds paint-job mods for trailer packs that ship **template paint jobs** (Jon Ruda's
@@ -16,6 +16,37 @@ trailers. That means no MS2 vehicle XMLs and no post-build patch.
 *Several skins in one mod - each with its own name and shop icon.*
 
 **New here? Read the [user guide](USER_GUIDE.md).**
+
+## What's new in 0.8.2
+
+* **AI traffic trailers.** SCS trailers that have traffic versions get an **AI traffic sheet** at
+  the top of their list. Paint it and SCS's AI trucks pull that trailer with your livery - leave
+  it empty for no AI traffic. It uses SCS's company-livery layout (the way SCS's own company
+  trailers work), and SkinForge re-maps copies of the traffic models so it fits:
+  * Box trailers: every length (28' / 45' / 53') shows the whole side band edge to edge, and
+    the roof gets a real area instead of SCS's tiny square.
+  * Tankers and dumpers: the ends get their own FRONT / REAR panels (SCS gives them one plain
+    colour).
+  * Pick which traffic lengths use the sheet.
+* **AI escorts and AI semis.** Escort vehicles (special transport) with your livery, laid out
+  like escort skin authors do by hand; SCS trucks can carry their cab art into AI traffic.
+  Mod tab: how often your AI vehicles show up.
+* **Finish, colour lock and colour per template.** A Jon Ruda length, a truck cab or an SCS
+  trailer body can have its own finish, lock and colour. An SCS trailer body with its own
+  settings becomes its own paint job, offered only on that body.
+* **Every skin keeps its own finish / lock.** Matte on one skin no longer changes the others.
+* **Player company logos.** Replace the game's company logos with your own (like MS2's Player
+  Company Logo template); your image is resized to the game's logo size.
+* **Yard signs** (SneaK's and MattVT's yards): templates come from your template folder when a
+  PNG is named after the sign; SneaK's original master def is preferred over repaints of it.
+* **Template folder** (community template sets from Trucky): matched to SCS trucks and trailers,
+  line art over your artwork in the preview, ↻ to re-read the folder without restarting.
+* **Templates where you want them.** Exports go to one folder for every project
+  (`Documents\SkinForge\Templates\<game>\<vehicle>`), and you choose which ones to export.
+* **Mod trailers drawn from 3D models:** empty parts hidden, the author's chassis names, and
+  **Bodies only** to list just the body sheets.
+* **Colour picker** with a hex field (paste `#1a2b3c`), a screen eyedropper and recent colours.
+* Cleaner window; slow templates show "Drawing…" instead of the previous picture.
 
 ## What's new in 0.8.1
 
@@ -130,7 +161,7 @@ right side. SkinForge lets you paint those pieces the right way up:
 
 **Already painted the flipped layout by hand?** *Make upright sheet from my artwork* cuts the
 marked pieces out of your current artwork, turns them upright and uses that as the upright
-sheet (a copy is saved as `<cab>_upright_from_art.png` in the templates folder). The build
+sheet (a copy is saved as `<cab>_upright_from_art.png` in the project's `art` folder). The build
 result is pixel-identical until you change it, so you can rework those pieces the right way up.
 
 When an upright sheet is written (Templates export or *Make upright sheet*), SkinForge locks
@@ -286,8 +317,9 @@ Pete 362, Freightshaker Coronado SD, Lord G350, RAM 3500).
 
 ## Projects
 
-Projects live in `Documents\SkinForge\<name>\` (`project.json` plus `art\` and
-`templates\<truck or trailer>\`). An "Untitled" project folder is renamed automatically the
+Projects live in `Documents\SkinForge\<name>\` (`project.json` plus `art\`). Exported
+templates go to one shared folder for every project: `Documents\SkinForge\Templates\<ATS or
+ETS2>\<truck or trailer>\`. An "Untitled" project folder is renamed automatically the
 first time you set the paint job name; *Rename project…* in the project menu renames it any time. The settings and preview cache are in `%LOCALAPPDATA%\SkinForge`.
 
 ## Status
@@ -305,12 +337,27 @@ been tested in game for Jon Ruda trailers and trucks and for SCS's own trailers.
 Trailers and logos: confirmed in game (0.2). Truck skins (0.3): in-game test pending.
 SCS base-game trailers (0.5): model-template method proven in game with the box trailer test mod; the app build is pending its first in-game test. SCS base-game trucks come next.
 
+## Template folder (0.8.2)
+
+SkinForge draws a template for every SCS truck and trailer from the game's models. If you prefer
+hand-made sheets, download the community template sets from Trucky:
+
+* ATS: <https://truckymods.io/american-truck-simulator/tools/truck-and-trailer-templates-898150>
+* ETS2: <https://truckymods.io/euro-truck-simulator-2/tools/ets2-truck-and-trailer-templates-947834>
+
+Unzip them anywhere, click **Template folder…** under Sources and pick the unzipped folder.
+Wherever a sheet fits the game's model, SkinForge's Template view and Templates export use it;
+everything else keeps SkinForge's own template. The sets are their authors' work and are not
+included with SkinForge.
+
 ## Credits
 
 * Vehicle mods SkinForge supports belong to their authors (Jon Ruda, Eugene and others) -
   skins built with SkinForge need the original mod installed. SkinForge never repackages
   or extracts their files.
 * Model format reference: ConverterPIX by mwl4.
+* Escort vehicle layout: done the way escort skin authors like Pauly lay out SCS's escorts by hand.
+* Community template sets for SCS trucks and trailers: their authors (download links above).
 * SCS Software for Euro Truck Simulator 2 and American Truck Simulator.
 
 ## License

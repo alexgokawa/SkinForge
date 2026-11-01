@@ -24,7 +24,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from . import sii
 from .pmg import ModelError, is_paintable, mat_effect, read_pmd_materials, read_pmd_variants, read_pmg, read_pmg_parts
 
-TEMPLATE_VERSION = 16
+TEMPLATE_VERSION = 32
 DENSITY = 256            # px per metre at "native" size (= SCS's own 53' box body: 4096 px over 16 m)
 MERGE_IOU = 0.97
 MIN_SIDE = 64
@@ -686,7 +686,32 @@ def face_labels(g: Group):
             if g.slot == "cabin" and key == "+y" and _is_hood(ts, bb, N, zr):
                 label = text.replace("ROOF", "HOOD")   # Volvo VNL / Cascadia: hood is part of the cab
             out.append(((bb[0] / N, bb[1] / N, bb[2] / N, bb[3] / N), label, notes, area))
-    return [o[:3] for o in _merge_mirrored(out)]
+    return [o[:3] for o in _drop_stacked(_merge_mirrored(out))]
+
+
+def _drop_stacked(labels):
+    """Faces mapped on top of each other (ATS dumper live floor: sides, roof edge and underside
+    all on one strip) -> only the biggest face keeps its label, instead of four printed over
+    each other. (Naming the others in a note blew the note up across whole chassis atlases.)"""
+    def inter(a, b):
+        ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+        iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+        return ix * iy
+    kept = []
+    for bb, text, notes, area in sorted(labels, key=lambda r: -r[3]):
+        own = (bb[2] - bb[0]) * (bb[3] - bb[1])
+        for k in kept:
+            if own > 0 and inter(bb, k[0]) / own > 0.5:
+                name = re.sub(r"[<>]|\bFRONT\b", "", text).strip()
+                if name and name not in k[4]:
+                    k[4].append(name)
+                break
+        else:
+            kept.append([bb, text, list(notes), area, []])
+    out = []
+    for bb, text, notes, area, also in kept:
+        out.append((bb, text, notes, area))
+    return out
 
 
 def _box_iou(a, b):
@@ -746,9 +771,76 @@ def _is_hood(ts, bb, N, zr):
     return z < zmin + 0.35 * (zmax - zmin) and y < ytop - 0.8
 
 
+STACKED = 2.6   # UV area / covered area above this: faces painted on top of each other
+
+
+def stack_ratio(layouts, N=512):
+    """Total UV area of the faces / area they cover on the sheet. ~1 for a normal unwrap, ~2 when
+    left and right side share one place (mirrored), 4.6 for the ATS dumper live floor whose
+    sides, top and underside are all mapped onto one strip."""
+    m = Image.new("L", (N, N))
+    d = ImageDraw.Draw(m)
+    tot = 0.0
+    for lay in layouts:
+        for t in lay.tris:
+            d.polygon([(uv[0] * N, uv[1] * N) for uv in t[0]], fill=255)
+            tot += _uv_area(t)
+    cov = m.histogram()[255] / (N * N)
+    return tot / cov if cov > 1e-6 else 0.0
+
+
+def is_stacked(g: Group) -> bool:
+    if not hasattr(g, "_stacked"):
+        try:
+            g._stacked = g.slot != "cabin" and stack_ratio(g.layouts) > STACKED
+        except Exception:
+            g._stacked = False
+    return g._stacked
+
+
+def _render_stacked(g: Group, size) -> Image.Image:
+    """Template for a part whose faces all share one area (dumper live floor): the covered
+    area with its outline only - the model's wireframe there is every face drawn over each
+    other and reads as a broken template - plus one plain label."""
+    W, H = size
+    m = Image.new("L", (W, H), 0)
+    d = ImageDraw.Draw(m)
+    for lay in g.layouts:
+        for t in lay.tris:
+            d.polygon([(uv[0] * W, uv[1] * H) for uv in t[0]], fill=255)
+    lw = max(1, round(max(W, H) / 1024))
+    edge = ImageChops.subtract(m, m.filter(ImageFilter.MinFilter(2 * lw + 1)))
+    im = Image.new("L", (W, H), 40)
+    im.paste(255, mask=m)
+    im.paste(0, mask=edge)
+    # label on the main band: rows / columns where most of the paint is (not the bbox, which
+    # spans small separate bits such as brackets)
+    small = m.resize((256, 256), Image.Resampling.BOX)
+    px = small.load()
+    rows = [sum(px[x, y] for x in range(256)) for y in range(256)]
+    cols = [sum(px[x, y] for y in range(256)) for x in range(256)]
+    if max(rows) > 0:
+        ys = [y for y, r in enumerate(rows) if r >= 0.5 * max(rows)]
+        xs = [x for x, c in enumerate(cols) if c >= 0.5 * max(cols)]
+        u0, u1 = min(xs) / 256 * W, (max(xs) + 1) / 256 * W
+        v0, v1 = min(ys) / 256 * H, (max(ys) + 1) / 256 * H
+        bw, bh = u1 - u0, v1 - v0
+        text = "SAME ART ON EVERY FACE"
+        note = "both sides, top and underside all show this area (SCS model) - keep it simple: a colour, a pattern or one logo"
+        fs = max(10, min(bh * 0.3, bw * 0.85 / (0.72 * len(text))))
+        fn = max(8, min(fs * 0.45, bw * 0.92 / (0.6 * len(note))))
+        cx, cy = (u0 + u1) / 2, (v0 + v1) / 2
+        dd = ImageDraw.Draw(im)
+        dd.text((cx, cy - fs * 0.35), text, fill=90, font=_font(fs), anchor="mm")
+        dd.text((cx, cy + fs * 0.55), note, fill=90, font=_font(fn), anchor="mm")
+    return im.convert("RGBA")
+
+
 def render_template(g: Group, size, label_group=None) -> Image.Image:
     """Black background, parts white with black wireframe (the style SkinForge's guide /
     mirrored-piece tools read), plus face names on bodies."""
+    if is_stacked(g):
+        return _render_stacked(g, size)
     W, H = size
     ss = 2 if max(W, H) <= 2048 else 1
     im = Image.new("L", (W * ss, H * ss), 40)   # dark grey (< 64 still reads as "unused" for the tools)
@@ -951,7 +1043,14 @@ def scan_truck(game, tid, res, progress=None, vroot="truck"):
         if len(variants_used[model]) > 1:
             vkey = f"{var}@{','.join(sorted(v for v in variants_used[model] if v))}"
         lay = load_layout(game, model, vkey, alt)
+        if lay is None and vkey:
+            # the variant filter left no painted piece (cab drawn through chassis-variant parts):
+            # fall back to the whole model rather than dropping the cab
+            lay = load_layout(game, model, None, alt)
+            if lay is not None:
+                print(f"[scan_truck] {tid}: cab {units} ({model} {var}) - variant shows no paint, used the whole model")
         if lay is None:
+            print(f"[scan_truck] {tid}: cab {units} skipped - no paintable geometry in {model} (variant {var})")
             continue
         layouts = [lay] + _free_extras(lay, [el for el, fits in extras
                                              if fits is None or any(f in units for f in fits)])
@@ -980,6 +1079,8 @@ def scan_truck(game, tid, res, progress=None, vroot="truck"):
                   suitable_for=list(units), targets=[(x, _cab_name(x.split(".")[0])) for x in units],
                   template_dds=path, kind="scs")
         sl.vroot, sl.cab, sl.cabin_units = vroot, True, list(units)
+        sl.layouts = layouts           # cab sheet geometry (for the AI-traffic livery transfer)
+        sl.game = game
         sl.alt_uv = alt
         sl.tex_size, sl.native, sl.acc_list = size, g.native, []
         slots.append(sl)
@@ -1066,9 +1167,19 @@ def mod_part_template(src, tdir, tid, accs, res=2048):
 
 
 def _cab_name(unit):
-    return {"highline": "Highline", "normal": "Normal", "highline_8x4": "Highline 8x4", "lowline": "Lowline",
-            "low": "Low", "high": "High", "fastb": "Fastback", "sedan": "Sedan", "offrd_4d": "Body",
-            "pckup4d_55": "Body"}.get(unit, unit.replace("_", " ").capitalize())
+    fixed = {"highline": "Highline", "normal": "Normal", "highline_8x4": "Highline 8x4", "lowline": "Lowline",
+             "low": "Low", "high": "High", "fastb": "Fastback", "sedan": "Sedan", "offrd_4d": "Body",
+             "pckup4d_55": "Body", "day": "Day cab", "dc": "Day cab"}
+    if unit in fixed:
+        return fixed[unit]
+    # SCS sleeper units: s48 / s72_rr / s48sb / daysb -> 48" sleeper, 72" sleeper RR, ... (SB = set-back axle)
+    m = re.fullmatch(r"(?:s|sl_?)(\d{2,3})(_?(?:rr|mr|hr|lr|sb))?", unit)
+    if m:
+        extra = (m.group(2) or "").strip("_").upper()
+        return f'{m.group(1)}" sleeper' + (f" {extra}" if extra else "")
+    if unit == "daysb":
+        return "Day cab SB"
+    return unit.replace("_", " ").capitalize()
 
 
 def _truck_part_label(g):
@@ -1112,6 +1223,170 @@ def vehicle_name(game, d, tid):
     return tid
 
 
+def scs_part_sheets(game, tid, vroot="trailer_owned"):
+    """{acc: (w, h)} - the sheet size SCS's own liveries give each part (their atlas masks are
+    named pjm_at_<x>x<y>_size_<w>x<h>.tobj). Exact, where the 3D model's texel density can't be
+    read cleanly (ATS dumper live floor: 4096x1024 sheet, chassis 2048x256)."""
+    root = f"/def/vehicle/{vroot}/{tid}/paint_job/accessory"
+    votes = {}
+    for fn in game.listdir(root):
+        if fn.endswith("/") or not fn.endswith(".sii"):
+            continue
+        data = game.read(f"{root}/{fn}")
+        if not data:
+            continue
+        text = data.decode("utf-8", "replace")
+        for mask, body in re.findall(r'paint_job_mask\s*:\s*"([^"]+)"(.*?)\}', text, re.S):
+            m = re.search(r"_size_(\d+)x(\d+)\.tobj$", mask)
+            if not m:
+                continue
+            wh = (int(m.group(1)), int(m.group(2)))
+            for acc in re.findall(r'acc_list\[\]\s*:\s*"([^"]+)"', body):
+                votes.setdefault(acc, {}).setdefault(wh, 0)
+                votes[acc][wh] += 1
+    return {a: max(v, key=v.get) for a, v in votes.items()}
+
+
+def scs_sheet_blocks(game, tid, vroot="trailer_owned"):
+    """The acc_list sets SCS's own liveries paint from one atlas mask (solid shared_ masks
+    left out): parts in one set share one sheet - food tank 53' body + 53' chassis."""
+    root = f"/def/vehicle/{vroot}/{tid}/paint_job/accessory"
+    blocks = []
+    for fn in game.listdir(root):
+        if fn.endswith("/") or not fn.endswith(".sii"):
+            continue
+        data = game.read(f"{root}/{fn}")
+        if not data:
+            continue
+        text = data.decode("utf-8", "replace")
+        for mask, body in re.findall(r'paint_job_mask\s*:\s*"([^"]+)"(.*?)\}', text, re.S):
+            if "/shared_" in mask:
+                continue
+            accs = frozenset(re.findall(r'acc_list\[\]\s*:\s*"([^"]+)"', body))
+            if accs:
+                blocks.append(accs)
+    return blocks
+
+
+def _merge_shared_sheets(groups, blocks):
+    """Groups SCS paints from one mask become one slot on the bigger group's sheet (the chassis
+    bits sit in a corner of the tank's layout). Needs the pair together in most liveries."""
+    if not blocks:
+        return groups
+    seen, together = {}, {}
+    for b in blocks:
+        for a in b:
+            seen[a] = seen.get(a, 0) + 1
+            for c in b:
+                if c != a:
+                    together[(a, c)] = together.get((a, c), 0) + 1
+    out = list(groups)
+    changed = True
+    while changed:
+        changed = False
+        for big in sorted(out, key=lambda g: -(g.native[0] * g.native[1])):
+            for small in out:
+                if small is big or small.native[0] * small.native[1] > big.native[0] * big.native[1]:
+                    continue
+                # only a chassis painted from its body's sheet (food tank 53' / 48'); parts of one
+                # kind sharing a mask (dumper live floors, chassis lengths) keep their own slots
+                if big.slot != "body" or small.slot != "chassis":
+                    continue
+                accs = [p.acc for p in small.parts]
+                ok = accs and all(seen.get(a) and max((together.get((a, p.acc), 0) for p in big.parts),
+                                                       default=0) * 2 >= seen[a] for a in accs)
+                if ok:
+                    big.parts += small.parts
+                    big.layouts += small.layouts
+                    out.remove(small)
+                    changed = True
+                    break
+            if changed:
+                break
+    return out
+
+
+MIN_COVER = 0.015   # mod trailer parts covering less of their sheet than this have nothing to paint
+KEEP_KEYS: set = set()   # slot keys the open project has artwork for: never hidden or merged away
+
+
+def coverage(layouts, N=256):
+    """Share of the sheet the faces cover (0..1)."""
+    m = Image.new("L", (N, N))
+    d = ImageDraw.Draw(m)
+    for lay in layouts:
+        for t in lay.tris:
+            d.polygon([(uv[0] * N, uv[1] * N) for uv in t[0]], fill=255)
+    return m.histogram()[255] / (N * N)
+
+
+def _uv_key(g):
+    return frozenset(tuple(sorted((round(uv[0], 4), round(uv[1], 4)) for uv in t[0]))
+                     for lay in g.layouts for t in lay.tris)
+
+
+def _tidy_mod_groups(groups, tid=""):
+    """Mod trailers drawn from 3D models: drop parts that leave their sheet (almost) empty - they
+    keep the paint colour - and merge parts of one slot type whose UV layout is identical (same
+    art fits both). Returns (groups, number hidden)."""
+    keep, hidden = [], 0
+    painted = lambda g: f"{tid}/" + re.sub(r"[^a-z0-9_]", "_", f"{g.slot}_{g.parts[0].unit}") in KEEP_KEYS
+    for g in groups:
+        if painted(g):
+            keep.append(g)
+            continue
+        try:
+            if coverage(g.layouts) < MIN_COVER:
+                hidden += 1
+                continue
+        except Exception:
+            pass
+        keep.append(g)
+    out, seen = [], {}
+    for g in keep:
+        try:
+            k = (g.slot, _uv_key(g))
+        except Exception:
+            out.append(g)
+            continue
+        if k in seen and not painted(g):
+            first = seen[k]
+            first.parts += g.parts
+            first.layouts += g.layouts
+            continue
+        seen.setdefault(k, g)
+        out.append(g)
+    return out, hidden
+
+
+def _body_without_model(game, tid):
+    """True when the trailer's body defs have no model (the body is part of each chassis model)."""
+    d = f"/def/vehicle/trailer_owned/{tid}/body"
+    try:
+        files = [f for f in game.listdir(d) if f.endswith(".sii")]
+    except Exception:
+        return False
+    if not files:
+        return False
+    for f in files:
+        data = game.read(f"{d}/{f}") or b""
+        if re.search(rb'\b(detail_)?model\s*:', data):
+            return False
+    return True
+
+
+def _mod_acc_name(game, tid, kind, unit):
+    """name: of a mod's accessory def, @@ markers stripped ("@@Lusty Original@@" -> "Lusty Original")."""
+    try:
+        data = game.read(f"/def/vehicle/trailer_owned/{tid}/{kind}/{unit}.sii")
+    except Exception:
+        data = None
+    if not data:
+        return ""
+    m = re.search(rb'\bname\s*:\s*"([^"]*)"', data)
+    return m.group(1).decode("utf-8", "replace").strip().strip("@").strip() if m else ""
+
+
 def scan_trailer(game, tid, res, progress=None):
     """Slots of one trailer (SCS's own or a mod trailer without an author template), drawn from
     its 3D models. Returns a Trailer (no slots when nothing on it is paintable)."""
@@ -1124,16 +1399,37 @@ def scan_trailer(game, tid, res, progress=None):
         groups = group_parts(scan_parts(game, tid))
     except Exception:
         groups = []
+    if not mod:
+        try:
+            groups = _merge_shared_sheets(groups, scs_sheet_blocks(game, tid))
+        except Exception:
+            pass
+    hidden = 0
+    if mod:
+        groups, hidden = _tidy_mod_groups(groups, tid)
     groups.sort(key=_sort_key)
     base_labels = [group_label(g) for g in groups]
+    tub_in_chassis = mod and _body_without_model(game, tid)
+    if mod:   # the author's own chassis names ("Lusty Wedge Back Original") instead of unit codes
+        for i, g in enumerate(groups):
+            if g.slot == "chassis" and not g.parts[0].unit.startswith("dolly"):
+                nm = _mod_acc_name(game, tid, "chassis", g.parts[0].unit) or g.parts[0].unit
+                word = "Body" if tub_in_chassis else "Chassis"
+                base_labels[i] = f"{word} · {nm} ({g.parts[0].unit})"
     labels = list(base_labels)
     for i, g in enumerate(groups):
-        if base_labels.count(base_labels[i]) > 1:
+        if base_labels.count(base_labels[i]) > 1 or len(_length(g.names)) > 1:
             labels[i] += " · " + ", ".join(dict.fromkeys(part_name(p) for p in g.parts))
+    sheets = {} if mod else scs_part_sheets(game, tid)
     slots = []
     used = set()
     for g, label in zip(groups, labels):
         g.parts.sort(key=lambda p: (p.unit != "paint", len(p.unit), p.unit))
+        decl = [sheets[p.acc] for p in g.parts if p.acc in sheets]
+        if decl:
+            w, h = max(set(decl), key=decl.count)
+            if abs(math.log((w / h) / (g.native[0] / g.native[1]))) > math.log(1.5):
+                g.native = (min(4096, w), min(4096, h))   # SCS's own sheet shape wins
         token = re.sub(r"[^a-z0-9_]", "_", f"{g.slot}_{g.parts[0].unit}")
         while token in used:
             token += "x"
@@ -1141,16 +1437,32 @@ def scan_trailer(game, tid, res, progress=None):
         size = output_size(g.native, res)
         path = template_path(tid, token, size)
         _register(game, path, (lambda sz, g=g: render_template(g, sz)), size)
+        if is_stacked(g):
+            label += " · same art on every face"
         s = Slot(key=f"{tid}/{token}", trailer=tid, token=token, label=label,
                  suitable_for=[], targets=[(p.acc, part_name(p)) for p in g.parts],
                  template_dds=path, kind="scs")
         s.acc_list = [p.acc for p in g.parts]
         s.tex_size = size
         s.native = g.native
+        s.layouts, s.game = g.layouts, game     # for the AI-traffic transfer
         s.main = False   # SCS paints chassis through acc_list "chassis.<unit>" (fuel tanker bas_1)
+        # the body sheets: "body" parts, or (mods like the Lusty tippers) chassis models that carry the tub
+        s.body = g.slot == "body" or (g.slot == "chassis" and bool(tub_in_chassis)
+                                       and not g.parts[0].unit.startswith("dolly"))
         slots.append(s)
+    if not mod and slots:   # SCS's traffic versions of this trailer: one company-layout sheet for AI traffic
+        try:
+            from . import ai as AI
+            sh = AI.sheet_slot(game, tid, res)
+            if sh is not None:
+                slots.insert(0, sh)     # first in the list: it is what AI traffic shows
+        except Exception:
+            import traceback
+            traceback.print_exc()
     t = Trailer(tid, tname, slots)
     t.vkind = "mod3d" if mod else "scs"
+    t.hidden_parts = hidden
     if not slots:
         t.error = NO_PAINT if mod else "No paintable parts found for this trailer in the game files"
     return t

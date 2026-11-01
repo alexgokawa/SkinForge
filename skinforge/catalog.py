@@ -78,7 +78,7 @@ class Slot:
 
     def to_json(self):
         return {
-            "key": self.key, "kind": self.kind, "trailer": self.trailer, "uvsets": self.uvsets, "token": self.token, "label": self.label,
+            "key": self.key, "kind": self.kind, "messy": getattr(self, "messy", False), "trailer": self.trailer, "uvsets": self.uvsets, "token": self.token, "label": self.label,
             "suitable_for": self.suitable_for,
             "targets": [{"unit": u, "name": n} for u, n in self.targets],
             "has_template": self.template_dds is not None,
@@ -88,6 +88,7 @@ class Slot:
                           ] if self.kind == "truck" else [],
             "tex_size": list(self.tex_size) if self.tex_size else None,
             "main": self.main,
+            "body": bool(getattr(self, "body", False)),
             "cab": self.cab,
             "overrides": [{"index": o.index, "parts": o.acc_list, "has_template": o.template_mask is not None,
                            "tex": (o.template_mask or "").lower()}
@@ -106,7 +107,8 @@ class Trailer:
         kind = getattr(self, "vkind", None) or (self.slots[0].kind if self.slots else "trailer")
         return {"id": self.id, "name": self.name, "kind": kind, "slots": [s.to_json() for s in self.slots],
                 "cabins": [{"unit": u, "name": n} for u, n in self.cabins],
-                "lazy": getattr(self, "lazy", False), "error": getattr(self, "error", "")}
+                "lazy": getattr(self, "lazy", False), "error": getattr(self, "error", ""),
+                "hidden_parts": getattr(self, "hidden_parts", 0)}
 
 
 def _label_from_token(token: str, targets=None) -> str:
@@ -404,7 +406,8 @@ def _truck_name(src, tdir, tid, loader):
     return tid
 
 
-def scan(src, res: int = 4096, trucks_loaded=(), progress=None, trailers_loaded=None, cars_loaded=()) -> list[Trailer]:
+def scan(src, res: int = 4096, trucks_loaded=(), progress=None, trailers_loaded=None, cars_loaded=(),
+         ai_loaded=()) -> list[Trailer]:
     from . import scsgame
     loader = src.read
     out = _scan_trailers(src, loader)
@@ -421,8 +424,14 @@ def scan(src, res: int = 4096, trucks_loaded=(), progress=None, trailers_loaded=
     sk = scsgame.scan_trucks(src, res, trucks_loaded, progress, skip=own)
     mod = lambda t: getattr(t, "vkind", "") in ("mod3d", "mod3d_truck")
     cars = scsgame.scan_cars(src, res, cars_loaded, progress)
+    from . import ai
+    # AI cars / buses: left out until someone asks; AI semis and AI trailers come in through the
+    # SCS truck / trailer "AI traffic" checkbox (art carried over from the normal templates)
+    # AI traffic trailers come in through the SCS trailer "AI traffic" checkbox too: only escorts
+    # keep a list of their own
+    ais = ai.scan_escorts(src, res, ai_loaded, progress)
     return (out + trucks + [t for t in st if mod(t)] + [t for t in sk if mod(t)]
-            + [t for t in st if not mod(t)] + [t for t in sk if not mod(t)] + cars)
+            + [t for t in st if not mod(t)] + [t for t in sk if not mod(t)] + cars + ais)
 
 
 class _ModsOnly:

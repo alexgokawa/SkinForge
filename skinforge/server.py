@@ -134,6 +134,7 @@ class App:
         p = B.new_project(paint_name=name, mod_name=f"{name} skins", code=code)
         game = (self.project or {}).get("game") or self.settings.get("last_game") or "ats"
         p["game"] = game
+        p["ui_open"] = []        # every vehicle group closed in a new project
         p["output_dir"] = P.game_mod_dirs().get(GAME_KEY[game]) or os.path.join(folder, "output")
         # carry over the packs from the last project (same game) so a new one is ready to paint
         if self.project and self.project.get("sources") and self.project.get("game", "ats") == game:
@@ -296,6 +297,8 @@ class App:
             t.error = scsgame.empty_reason(game, tid)
         self.trailers = [t if (x.id == tid and getattr(x, "vkind", "") in ("scs_truck", "mod3d_truck")) else x
                          for x in self.trailers]
+        self._remember_unusable(t)
+        self._official_scan([t])
         self.busy = ""
         self.save()
 
@@ -317,6 +320,36 @@ class App:
         if not t.slots:
             t.error = scsgame.empty_reason(game, tid, "car")
         self.trailers = [t if (x.id == tid and getattr(x, "vkind", "") == "scs_car") else x for x in self.trailers]
+        self._remember_unusable(t)
+        self._official_scan([t])
+        self.busy = ""
+        self.save()
+
+    def load_ai(self, aid):
+        """Read one AI traffic vehicle's model (Load button)."""
+        from . import ai
+        game = getattr(self._src, "game", None)
+        if game is None:
+            raise ValueError("Add your game folder first (AI traffic comes from the game files)")
+        lst = self.project.setdefault("scs_ai", [])
+        if aid not in lst:
+            lst.append(aid)
+        res = int(self.project.get("resolution", 4096))
+        t0 = time.time()
+        t = ai.scan_ai_trailer(game, aid, res) if aid.startswith("ait.") else \
+            ai.scan_escort(game, aid, res) if aid.startswith("esc.") else ai.scan_ai(game, aid, res)
+        L.info(f"Loaded AI {aid}: {len(t.slots)} slots in {time.time() - t0:.1f}s"
+               + (f" - {t.error}" if getattr(t, "error", "") else ""))
+        t.lazy = False
+        q = self._ai_quality()
+        ok = bool(t.slots) and not any(getattr(sl, "messy", False) for sl in t.slots)
+        if not aid.startswith("esc."):
+            q[f"{self.project.get('game', 'ats')}:{aid}"] = ok
+            self._save_settings()
+        if not ok and not getattr(t, "error", ""):
+            t.error = "No usable template: SCS never laid this model out for liveries (parts overlap) - hidden from the list"
+        self.trailers = [t if (x.id == aid and getattr(x, "vkind", "") in ("scs_ai", "scs_ai_truck", "scs_ai_trailer", "scs_escort")) else x
+                         for x in self.trailers]
         self.busy = ""
         self.save()
 
@@ -392,6 +425,8 @@ class App:
         L.info(f"Loaded trailer {tid}: {len(t.slots)} slots in {time.time() - t0:.1f}s")
         t.lazy = False
         self.trailers = [t if (x.id == tid and getattr(x, "vkind", "") == "scs") else x for x in self.trailers]
+        self._remember_unusable(t)
+        self._official_scan([t])
         self.busy = ""
         self.save()
 
@@ -444,8 +479,17 @@ class App:
             return
         self._load_sources(gen)
 
+    def _art_keys(self):
+        p = self.project or {}
+        keys = {k for k, v in p.get("slots", {}).items() if isinstance(v, dict) and (v.get("art") or v.get("overrides"))}
+        for art in p.get("skin_art", {}).values():
+            keys |= {k for k, v in art.items() if v}
+        return keys
+
     def _load_sources(self, gen):
         p = self.project
+        from . import scsgame as _sg
+        _sg.KEEP_KEYS = self._art_keys()
         status, ok, trailers = [], [], []
         self._replace_missing_game_folder()
         self._ensure_game_folder()
@@ -465,6 +509,7 @@ class App:
                 trailers = catalog.scan(src, int(p.get("resolution", 4096)),
                                         trucks_loaded=tuple(p.get("scs_trucks", [])),
                                         cars_loaded=tuple(p.get("scs_cars", [])),
+                                        ai_loaded=tuple(p.get("scs_ai", [])),
                                         progress=lambda m: setattr(self, "busy", m),
                                         trailers_loaded=self._trailers_in_use())
             except Exception as e:
@@ -481,6 +526,15 @@ class App:
                                         if src.exists(pth)), None)
         if lg.slots:
             trailers.append(lg)
+        from . import player_logos   # the player's company logos (replace the game's own)
+        player_logos.detect(src)
+        trailers.append(player_logos.group(p.get("game", "ats")))
+        from . import signs   # MattVT / SneaK yard sign packs in the mod folder
+        signs.detect([d for g, d in P.game_mod_dirs().items() if g == GAME_KEY.get(p.get("game", "ats"))])
+        self._official_root()   # yard signs: templates from the template folder (set before any read)
+        sg = signs.group()
+        if sg:
+            trailers.append(sg)
         with self.lock:
             if gen != self._gen or p is not self.project:
                 return            # sources changed meanwhile: a newer scan owns the result
@@ -490,6 +544,209 @@ class App:
                 + f" -> {len(trailers)} vehicles/groups")
             self.busy = ""
         threading.Thread(target=self._prewarm, args=(trailers,), daemon=True).start()
+        self._official_scan(trailers)
+        if src is not None and getattr(src, "game", None) is not None:
+            threading.Thread(target=self._ai_check, args=(gen, src.game, p.get("game", "ats")), daemon=True).start()
+
+    # ---------- official SCS templates (forum PNG sets) ----------
+    def _official_root(self):
+        d = (self.settings.get("official_dirs") or {}).get(self.project.get("game", "ats"))
+        root = d if d and os.path.isdir(d) else None
+        from . import signs
+        if signs.TEMPLATE_ROOT[0] != root:   # yard signs look for their templates there too
+            signs.TEMPLATE_ROOT[0] = root
+            signs.forget_folder()
+        return root
+
+    def official_for(self, key):
+        if self.settings.get("official_off"):
+            return None
+        return (getattr(self, "official", None) or {}).get(key)
+
+    def _official_scan(self, trailers):
+        """Find the official sheet of every SCS truck / trailer slot (background; the masks are
+        cached, so later starts only compare)."""
+        root = self._official_root()
+        if not hasattr(self, "official") or getattr(self, "_official_key", None) != root:
+            self.official = {}            # other game / other folder: keys like scs.box exist in both games
+            self._official_key = root
+            self._official_gen = getattr(self, "_official_gen", 0) + 1
+        if not root:
+            return
+        gen, target = getattr(self, "_official_gen", 0), self.official
+        todo = [(t, s) for t in trailers if getattr(t, "vkind", "") in ("scs", "scs_truck") and not getattr(t, "lazy", False)
+                for s in t.slots if s.kind == "scs" and s.key not in self.official]
+        if not todo:
+            return
+
+        def run():
+            from . import official as O
+            self.official_busy = getattr(self, "official_busy", 0) + 1
+            try:
+                for t, s in todo:
+                    if gen != self._official_gen or target is not self.official:
+                        return            # folder changed / reloaded meanwhile: a newer scan owns the result
+                    try:
+                        m = O.match(root, t.id, t.name, self.template_small(s.key), cab=bool(getattr(s, "cab", False)))
+                    except Exception:
+                        traceback.print_exc()
+                        m = None
+                    target[s.key] = m
+                n = sum(1 for _t, s in todo if target.get(s.key))
+                L.info(f"Official templates: {n} of {len(todo)} slots matched in {root}")
+            finally:
+                self.official_busy -= 1
+        threading.Thread(target=run, daemon=True).start()
+
+    def _forget_sign_templates(self):
+        """Yard sign templates may come from the template folder: read them again."""
+        from . import signs
+        pre = signs.GROUP_ID + "/"
+        with self.cache_lock:
+            for c in (self.tmpl_cache, self.guide_cache):
+                for k in list(c.keys()):
+                    if isinstance(k, tuple) and any(isinstance(x, str) and x.startswith(pre) for x in k):
+                        c.pop(k, None)
+            self.png_cache.clear()
+
+    def reload_official(self):
+        """Read the template folder again (PNGs added / replaced / removed) without restarting."""
+        from . import official as O, signs
+        root = self._official_root()
+        O.forget(root)
+        signs.forget_folder()
+        self._forget_sign_templates()
+        self.official = {}
+        self._official_gen = getattr(self, "_official_gen", 0) + 1
+        with self.cache_lock:
+            self.png_cache.clear()
+            for k in [k for k in list(self.guide_cache.keys()) if isinstance(k, tuple) and k and k[0] == "og"]:
+                self.guide_cache.pop(k, None)
+        L.info(f"Template folder reloaded: {root}")
+        self._official_scan(self.trailers)
+
+    def set_official(self, d):
+        if "path" in d:
+            dirs = self.settings.setdefault("official_dirs", {})
+            if d["path"]:
+                dirs[self.project.get("game", "ats")] = d["path"]
+            else:
+                dirs.pop(self.project.get("game", "ats"), None)
+            self.official = {}
+            self._official_gen = getattr(self, "_official_gen", 0) + 1
+            with self.cache_lock:
+                for k in [k for k in list(self.guide_cache.keys()) if isinstance(k, tuple) and k and k[0] == "og"]:
+                    self.guide_cache.pop(k, None)
+            self._official_root()          # yard signs follow the new folder
+            self._forget_sign_templates()
+        if d.get("reload"):
+            self.reload_official()
+            return
+        if "off" in d:
+            self.settings["official_off"] = bool(d["off"])
+        self._save_settings()
+        with self.cache_lock:
+            self.png_cache.clear()
+        self._official_scan(self.trailers)
+
+    def official_guide(self, png, size):
+        ck = ("og", png, tuple(size))
+        with self.cache_lock:
+            g = self.guide_cache.get(ck)
+        if g is None:
+            from . import official as O
+            try:
+                g = O.guide(png, tuple(size))
+            except Exception:
+                traceback.print_exc()
+                return None
+            with self.cache_lock:
+                self.guide_cache.put(ck, g)
+        return g
+
+    def official_json(self):
+        from . import official as O
+        root = self._official_root()
+        return {"dir": (self.settings.get("official_dirs") or {}).get(self.project.get("game", "ats"), ""),
+                "found": bool(root), "off": bool(self.settings.get("official_off")),
+                "busy": bool(getattr(self, "official_busy", 0)),
+                "slots": {k: O.label(v, root) for k, v in (getattr(self, "official", None) or {}).items() if v}}
+
+    # ---------- AI traffic: only vehicles with a clean, usable template are listed ----------
+    def _ai_quality(self):
+        from .ai import AIQ_VERSION
+        from .scsgame import TEMPLATE_VERSION
+        q = self.settings.setdefault("ai_quality", {})
+        ver = f"{AIQ_VERSION}.{TEMPLATE_VERSION}"
+        if q.get("_v") != ver:
+            q.clear()
+            q["_v"] = ver
+        return q
+
+    def visible_trailers(self):
+        """Hide AI vehicles / trailers whose model has no usable template (SCS never laid them
+        out for liveries: parts overlap). One that already has artwork in this project stays."""
+        q = self._ai_quality()
+        game = self.project.get("game", "ats")
+        arts = set()
+        for a in self.project.get("skin_art", {}).values():
+            arts |= {k.split("/")[0] for k, c in a.items() if c.get("art")}
+        return [t for t in self.trailers if t.id in arts or not self._unusable(t, q, game)]
+
+    @staticmethod
+    def _nothing_to_paint(t):
+        """Read, but nothing paintable (not: models missing - the user can fix that by adding
+        the main pack - and not: a read error)."""
+        from .scsgame import NO_MODELS
+        err = getattr(t, "error", "") or ""
+        return (not getattr(t, "lazy", False) and not t.slots and bool(err)
+                and err != NO_MODELS and not err.startswith("Could not read"))
+
+    def _unusable(self, t, q, game):
+        if getattr(t, "vkind", "") == "scs_escort":
+            return False          # escorts always stay listed; a failed load shows its error instead
+        if q.get(f"{game}:{t.id}") is False:
+            return True
+        return self._nothing_to_paint(t)
+
+    def _remember_unusable(self, t):
+        """Trucks / trailers / cars that turned out to have nothing paintable stay out of the
+        list from now on (also before Load, in every project)."""
+        if self._nothing_to_paint(t):
+            with self.lock:
+                self._ai_quality()[f"{self.project.get('game', 'ats')}:{t.id}"] = False
+                self._save_settings()
+
+    def _ai_check(self, gen, game_src, game):
+        """Read every AI model once in the background (results cached in settings.json)."""
+        from . import ai
+        q = self._ai_quality()
+        todo = [t.id for t in self.trailers
+                if getattr(t, "vkind", "").startswith("scs_ai") and f"{game}:{t.id}" not in q]
+        if not todo:
+            return
+        self.ai_checking = True
+        try:
+            infos = ai.all_infos(game_src)
+            for i, aid in enumerate(todo):
+                if gen != self._gen:
+                    return
+                info = infos.get(aid)
+                ok = ai.usable(game_src, aid, info) if info else False
+                if ok is None:
+                    continue
+                with self.lock:   # settings.json is also written by request threads
+                    q[f"{game}:{aid}"] = ok
+                    if i % 10 == 9:
+                        self._save_settings()
+            L.info(f"AI check ({game}): {sum(1 for k, v in q.items() if k.startswith(game + ':') and v is False)} "
+                   f"of {len(todo)} AI models have no usable template - hidden")
+        except Exception:
+            traceback.print_exc()
+        finally:
+            self.ai_checking = False
+            with self.lock:
+                self._save_settings()
 
     def _prewarm(self, trailers):
         """Decode every template once in the background (cached on disk for next start),
@@ -536,10 +793,32 @@ class App:
                 ident.append(f"{sp}|{os.path.getsize(sp)}|{os.path.getmtime(sp)}")
             except OSError:
                 pass
+        sl = self.slot(key)
+        arc = getattr(sl, "tex_archive", None) if sl is not None else None
+        if arc:   # yard sign: its own pack (not a source) - a new pack version = new cache entry
+            try:
+                ident.append(f"{arc}|{os.path.getsize(arc)}|{os.path.getmtime(arc)}")
+            except OSError:
+                pass
+            from . import signs
+            ft = signs.folder_template(sl.token)   # ... and the template folder's PNG for it
+            if ft:
+                try:
+                    ident.append(f"{ft}|{os.path.getsize(ft)}|{os.path.getmtime(ft)}")
+                except OSError:
+                    pass
         h = hashlib.sha1(f"{kind}|v4|{path}|{'|'.join(ident)}".encode()).hexdigest()[:20]
         d = os.path.join(P.app_data_dir(), "cache")
         os.makedirs(d, exist_ok=True)
         return os.path.join(d, f"{kind}_{h}.png")
+
+    def _read_tex(self, key, path):
+        """A template's bytes: from the sources, or from a yard-sign pack in the mod folder."""
+        s = self.slot(key)
+        if s is not None and getattr(s, "tex_archive", None):
+            from . import signs
+            return signs.read(s.token)
+        return self._src.read(path) if (path and self._src) else None
 
     def template_small(self, key, ovr=-1):
         ck = (key, ovr)
@@ -560,7 +839,12 @@ class App:
                     im = None
             if im is None:
                 path = self._template_path(key, ovr)
-                data = self._src.read(path) if (path and self._src) else None
+                t0 = time.time()
+                data = self._read_tex(key, path) if path else None
+                dt = time.time() - t0
+                if dt > 3 or not data:
+                    L.info(f"Template {key} (ovr {ovr}): {path} -> "
+                           f"{'%d bytes' % len(data) if data else 'NOTHING'} in {dt:.1f}s")
                 if data:
                     try:
                         full = T.load_image(data)
@@ -740,7 +1024,7 @@ class App:
         info = self.set_art(key, UPRIGHT, "upright.png", data)
         s = self.slot(key)
         names = {t.id: t.name for t in self.trailers}
-        out = os.path.join(self.project_dir, "templates", B.safe_filename(names.get(s.trailer, s.trailer)))
+        out = os.path.join(self.project_dir, "art")   # made from YOUR artwork: stays with the project
         os.makedirs(out, exist_ok=True)
         label = re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9]+", "_", s.label).strip("_") or "main")
         sid = self.project.get("active_skin", "")
@@ -807,7 +1091,8 @@ class App:
         fp = self.art_abs(rel)
         mt = os.path.getmtime(fp) if fp and os.path.isfile(fp) else 0
         ck = (key, ovr, size, mode, color, rel, mt, tuple(self.project.get("sources", [])),
-              self.compose_sig(key) if ovr < 0 else "", json.dumps(self.flip_marks(key)) if ovr < 0 else "")
+              self.compose_sig(key) if ovr < 0 else "", json.dumps(self.flip_marks(key)) if ovr < 0 else "",
+              self.official_for(key) if ovr < 0 else None)
         with self.cache_lock:
             cached = self.png_cache.get(ck)
         if cached:
@@ -829,6 +1114,9 @@ class App:
             return data
         tmpl = self.template_small(key, ovr)
         guide = self.guide_small(key, ovr) if mode in ("paint", "upright") else None
+        off = self.official_for(key) if ovr < 0 else None
+        if off and guide is not None:   # the template folder's sheet: its lines over the artwork too
+            guide = self.official_guide(off, tmpl.size) or guide
         art = self.art_small(rel) if mode != "template" else None
         rgb = None if color == "none" else B.hex_to_rgb(color)
         isl = self.islands(key) if ovr < 0 else []
@@ -855,7 +1143,16 @@ class App:
                 base.alpha_composite(dim)
             im = base.convert("RGB")
         elif mode == "template":
-            im = tmpl.convert("RGB")
+            off = self.official_for(key) if ovr < 0 else None
+            if off:
+                from . import official as O
+                try:
+                    im = O.render(off, tmpl.size)
+                except Exception:
+                    traceback.print_exc()
+                    im = tmpl.convert("RGB")
+            else:
+                im = tmpl.convert("RGB")
         elif mode == "clean":
             im = T.checker(tmpl.size) if rgb is None else Image.new("RGBA", tmpl.size, rgb + (255,))
             if art is not None:
@@ -898,6 +1195,9 @@ class App:
         with open(fp, "wb") as f:
             f.write(data)
         self._assign(key, ovr, rel)
+        sl = self.slot(key)
+        if sl is not None and sl.trailer == "yard_signs":
+            return self.art_info(im, "sign", sl.tex_size)
         return self.art_info(im, kind, self.template_small(key, ovr).size if kind != "logo" else None)
 
     def _art_in_use(self, rel, except_key, except_ovr):
@@ -942,6 +1242,10 @@ class App:
         w, h = im.size
         a_min, a_max = im.getchannel("A").getextrema()
         warn = []
+        if kind == "sign":   # yard sign: the pack's texture size; opaque art is normal here
+            if tmpl_size and abs(w / h - tmpl_size[0] / tmpl_size[1]) > 0.02 * tmpl_size[0] / tmpl_size[1]:
+                warn.append(f"{w}x{h} doesn't match the sign's shape ({tmpl_size[0]}x{tmpl_size[1]}) - it will be stretched")
+            return {"w": w, "h": h, "warnings": warn}
         if kind == "logo":
             if w != h:
                 warn.append(f"{w}x{h}: will be centred on a transparent {logos.LOGO_SIZE} square")
@@ -958,8 +1262,14 @@ class App:
             warn.append("No transparency: the whole trailer gets fixed colours and the colour picker does nothing")
         return {"w": w, "h": h, "warnings": warn}
 
+    def templates_root(self):
+        """One template folder for every project: Documents\\SkinForge\\Templates\\<ATS|ETS2>
+        (templates come from the vehicles, not from a project)."""
+        game = "ETS2" if self.project.get("game") == "ets2" else "ATS"
+        return os.path.join(P.projects_dir(), "Templates", game)
+
     def export_templates(self, keys):
-        root = os.path.join(self.project_dir, "templates")
+        root = self.templates_root()
         os.makedirs(root, exist_ok=True)
         names = {t.id: t.name for t in self.trailers}
         folders = set()
@@ -982,7 +1292,7 @@ class App:
                 if not path or path.lower() in done_paths:
                     continue
                 done_paths.add(path.lower())
-                data = self._src.read(path)
+                data = self._read_tex(key, path)
                 if not data:
                     continue
                 out = os.path.join(root, B.safe_filename(names.get(s.trailer, s.trailer)))   # one folder per truck/trailer
@@ -1002,6 +1312,10 @@ class App:
                     full = full.resize(T.scaled_size(full.size, eff), Image.Resampling.LANCZOS)
                 elif s.kind != "scs" and max(full.size) < res:   # paint at the project resolution (e.g. 2048 templates -> 4096)
                     full = full.resize(T.scaled_size(full.size, res), Image.Resampling.LANCZOS)
+                off = self.official_for(key) if ovr < 0 else None
+                if off:   # SCS's own sheet for this slot (same UVs) - at the size picked above
+                    from . import official as O
+                    full = O.render(off, full.size)
                 label = re.sub(r"[^A-Za-z0-9]+", "_", s.label).strip("_") or "main"
                 if suffix:   # parts are shared per vehicle: name them by their own texture
                     label = "part_" + path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
@@ -1132,16 +1446,19 @@ class App:
                       for k in set(self.project["slots"]) | set(self.project["skin_art"].get(sid, {}))
                       | set(self.project["skin_art"].get("", {}))}
         sk = B.skin(self.project)
+        p.update(B.skin_opts(self.project, sid))   # finish / lock / AI traffic: the active skin's
         p["paint_name"] = sk.get("name", "")
         p["icon"] = sk.get("icon", "")
         p["skin_counts"] = {x["id"]: sum(1 for k, c in self.project["skin_art"].get(x["id"], {}).items()
-                                         if c.get("art") and not k.startswith(logos.GROUP_ID + "/"))
+                                         if c.get("art") and not logos.is_tex(k))
                             for x in self.project["skins"]}
         cols = {}
         for t in self.trailers:
             for sl in t.slots:
                 if sl.kind != "logo":
                     c = B.art_cfg(self.project, B.color_key(sl), sid).get("color")
+                    if not c and sl.kind == "scs" and (getattr(sl, "cab", False) or getattr(sl, "body", False)):   # older projects: vehicle-wide
+                        c = B.art_cfg(self.project, f"@scs/{sl.trailer}", sid).get("color")
                     if c:
                         cols[sl.key] = c
         p["slot_colors"] = cols
@@ -1167,11 +1484,13 @@ class App:
             src = B.skin(p)
             name = (d.get("name") or "").strip() or (f"{src['name']} copy" if act == "duplicate" else f"Skin {len(live) + 1}")
             new = {"id": sid, "name": name, "icon": src.get("icon", "") if act == "duplicate" else ""}
+            if act == "duplicate" and src.get("opts"):    # same finish / lock / traffic as the original
+                new["opts"] = json.loads(json.dumps(src["opts"]))
             p["skins"].append(new)
             arts = {}
             if act == "duplicate":
                 arts = {k: json.loads(json.dumps(c)) for k, c in p["skin_art"].get(src["id"], {}).items()
-                        if not k.startswith(logos.GROUP_ID + "/")}
+                        if not logos.is_tex(k)}
             p["skin_art"][sid] = arts
             p["active_skin"] = sid
         elif act == "rename":
@@ -1192,14 +1511,14 @@ class App:
             if shipped:   # saves may use its paint jobs: keep them as plain colour, hide the skin
                 sk["deleted"] = True
                 p["skin_art"][sk["id"]] = {k: c for k, c in p["skin_art"].get(sk["id"], {}).items()
-                                           if k.startswith(logos.GROUP_ID + "/")}
+                                           if logos.is_tex(k)}
             else:
                 p["skins"].remove(sk)
                 if sk["id"]:
                     p["skin_art"].pop(sk["id"], None)
                 else:
                     p["skin_art"][""] = {k: c for k, c in p["skin_art"].get("", {}).items()
-                                         if k.startswith(logos.GROUP_ID + "/")}
+                                         if logos.is_tex(k)}
                     p["skins"].insert(0, {"id": "", "name": "", "icon": "", "deleted": True})
             if p["active_skin"] == sk["id"]:
                 p["active_skin"] = next(x["id"] for x in p["skins"] if not x.get("deleted"))
@@ -1208,6 +1527,21 @@ class App:
         self.save()
         return shipped if act == "delete" else None
 
+    def ui_open(self):
+        """Expanded vehicle groups, per project: a new project starts with every group closed.
+        Projects from before 0.8.2 fall back to the old app-wide list once."""
+        p = self.project
+        if "ui_open" not in p:
+            return list(self.settings.get("ui_open", []))
+        return list(p["ui_open"])
+
+    def set_ui_open(self, gid, is_open):
+        cur = [x for x in self.ui_open() if x != gid]
+        if is_open:
+            cur.append(gid)
+        self.project["ui_open"] = cur[-200:]
+        self.save()
+
     def state(self):
         p = self.view()
         return {
@@ -1215,11 +1549,13 @@ class App:
             "project": p,
             "project_file": self.project_file,
             "project_dir": self.project_dir,
-            "trailers": [t.to_json() for t in self.trailers],
+            "trailers": [t.to_json() for t in self.visible_trailers()],
+            "ai_check": bool(getattr(self, "ai_checking", False)),
+            "official": self.official_json(),
             "sources": self.source_status,
             "mod_dirs": P.game_mod_dirs(),
             "recent": self.settings.get("recent", []),
-            "ui_open": self.settings.get("ui_open", []),
+            "ui_open": self.ui_open(),
             "build": self.build_state,
             "out_exists": os.path.isfile(self.output_path()),
             "busy": getattr(self, "busy", ""),
@@ -1250,7 +1586,8 @@ def _has_tk():
 
 
 SETTABLE = {"export_guides", "truck_uvset", "paint_name", "mod_name", "author", "mod_version", "code", "price", "finish", "base_color",
-            "color_locked", "metallic", "resolution", "output_dir", "description", "template_size", "res_by_vehicle", "finish_by_vehicle", "lock_by_vehicle", "ask_overwrite"}
+            "color_locked", "metallic", "resolution", "output_dir", "description", "template_size", "res_by_vehicle", "finish_by_vehicle", "lock_by_vehicle", "traffic_by_vehicle", "ask_overwrite", "ai_spawn", "bodies_only",
+            "finish_by_slot", "lock_by_slot", "traffic_by_slot", "ai_lengths"}
 
 
 def render_at_or_resize(scsgame, path, im, size):
@@ -1382,14 +1719,47 @@ def make_handler(app: App):
                     for k, v in d.items():
                         if k not in SETTABLE:
                             continue
+                        tgt = app.project
+                        if k in B.SKIN_OPTS:     # paint job options belong to the active skin
+                            tgt = B.skin(app.project).setdefault("opts", {})
+                            if tgt.get(k) is None:   # first change in this skin: start from what it shows now
+                                cur = app.project.get(k)
+                                if cur is None:
+                                    cur = B.DEFAULT_PROJECT.get(k)
+                                if cur is None and k.endswith(("_by_slot", "_by_vehicle")):
+                                    cur = {}         # per-template / per-vehicle maps start empty
+                                tgt[k] = json.loads(json.dumps(cur))
                         if k == "metallic":
-                            app.project["metallic"].update(v)
-                        elif k in ("finish_by_vehicle", "lock_by_vehicle"):
+                            tgt["metallic"].update(v)
+                        elif k in ("traffic_by_vehicle", "traffic_by_slot"):
+                            dv = tgt.setdefault(k, {})
+                            for tid, x in (v or {}).items():
+                                if x in ("ai", "both") or (x == "own" and k == "traffic_by_slot"):
+                                    dv[str(tid)] = x           # a template may say "own" against its truck's "ai"
+                                else:
+                                    dv.pop(str(tid), None)     # "own" = the default
+                        elif k == "ai_lengths":        # {trailer id: [28, 45] | null = every length}
+                            dv = tgt.setdefault(k, {}) if isinstance(tgt.get(k), dict) else tgt.setdefault(k, {})
+                            if not isinstance(dv, dict):
+                                dv = tgt[k] = {}
+                            for tid, x in (v or {}).items():
+                                if isinstance(x, list):
+                                    dv[str(tid)] = sorted({int(n) for n in x})
+                                else:
+                                    dv.pop(str(tid), None)
+                        elif k == "bodies_only":       # {tid: true} - list only the body sheets
                             dv = app.project.setdefault(k, {})
+                            for tid, x in (v or {}).items():
+                                if x:
+                                    dv[str(tid)] = True
+                                else:
+                                    dv.pop(str(tid), None)
+                        elif k in ("finish_by_vehicle", "lock_by_vehicle", "finish_by_slot", "lock_by_slot"):
+                            dv = tgt.setdefault(k, {})
                             for tid, x in (v or {}).items():
                                 if x is None or x == "":
                                     dv.pop(str(tid), None)   # back to the mod's setting
-                                elif k == "finish_by_vehicle":
+                                elif k in ("finish_by_vehicle", "finish_by_slot"):
                                     names = [n for n in ("gloss", "metallic", "matte") if n in str(x).split("+")]
                                     if names:
                                         dv[str(tid)] = "+".join(names)
@@ -1413,7 +1783,7 @@ def make_handler(app: App):
                                                  "Start a new project for a new code.")
                             app.project[k] = v
                         else:
-                            app.project[k] = v
+                            tgt[k] = v
                     app.save()
                     if "resolution" in d and d["resolution"] != old_res and any(
                             t.slots and t.slots[0].kind == "scs" for t in app.trailers):
@@ -1550,6 +1920,8 @@ def make_handler(app: App):
                 s = app.slot(d["key"])
                 kind = s.kind if s else "trailer"
                 ts = app.template_small(d["key"], int(d.get("ovr", -1))).size if kind != "logo" else None
+                if s is not None and s.trailer == "yard_signs":
+                    kind, ts = "sign", s.tex_size
                 with open(fp, "rb") as f:
                     return {"info": App.art_info(T.load_image(f.read()), kind, ts), "file": fp}
             if path == "/api/icon":
@@ -1582,16 +1954,17 @@ def make_handler(app: App):
                     st = app.state()
                     st["kept"] = bool(kept)
                     return st
-            if path == "/api/ui/open":
-                # which vehicle groups are expanded in the list: kept in settings.json, because the
-                # app window gets a new port (= new browser storage) on every start
+            if path == "/api/official":
                 d = self._jbody()
                 with app.lock:
-                    cur = [x for x in app.settings.get("ui_open", []) if x != d["id"]]
-                    if d.get("open"):
-                        cur.append(d["id"])
-                    app.settings["ui_open"] = cur[-200:]
-                    app._save_settings()
+                    app.set_official(d)
+                    return app.state()
+            if path == "/api/ui/open":
+                # which vehicle groups are expanded in the list: kept in the project (not browser
+                # storage - the window gets a new port on every start); a new project starts closed
+                d = self._jbody()
+                with app.lock:
+                    app.set_ui_open(d["id"], bool(d.get("open")))
                 return {"ok": True}
             if path == "/api/game":
                 d = self._jbody()
@@ -1607,6 +1980,11 @@ def make_handler(app: App):
                 d = self._jbody()
                 with app.lock:
                     app.load_car(d["id"])
+                    return app.state()
+            if path == "/api/scs/ai":
+                d = self._jbody()
+                app.load_ai(d["id"])
+                with app.lock:
                     return app.state()
             if path == "/api/scs/trailer":
                 d = self._jbody()

@@ -60,7 +60,9 @@ def _mip_chain(im: Image.Image):
     return levels
 
 
-def encode_dds_dxt5(im: Image.Image, mipmaps: bool = True) -> bytes:
+def encode_dds_dxt5(im: Image.Image, mipmaps: bool = True, srgb: bool = False) -> bytes:
+    """DXT5 / BC3 with mips. srgb=True writes a DX10 header with BC3_UNORM_SRGB (78) - the
+    format SCS's own and most map-mod textures use since 1.50."""
     im = im.convert("RGBA")
     w, h = im.size
     levels = _mip_chain(im) if mipmaps else [im]
@@ -70,8 +72,10 @@ def encode_dds_dxt5(im: Image.Image, mipmaps: bool = True) -> bytes:
     caps = 0x1000 | ((0x400000 | 0x8) if mipmaps else 0)
     hdr = struct.pack("<4sIIIIIII", b"DDS ", 124, flags, h, w, top, 0, len(levels))
     hdr += b"\0" * 44
-    hdr += struct.pack("<II4sIIIII", 32, 0x4, b"DXT5", 0, 0, 0, 0, 0)
+    hdr += struct.pack("<II4sIIIII", 32, 0x4, b"DX10" if srgb else b"DXT5", 0, 0, 0, 0, 0)
     hdr += struct.pack("<IIIII", caps, 0, 0, 0, 0)
+    if srgb:
+        hdr += struct.pack("<IIIII", 78, 3, 0, 1, 0)
     return hdr + body
 
 
@@ -89,7 +93,15 @@ def encode_dds_bgra(im: Image.Image) -> bytes:
     return hdr + raw
 
 
+# sRGB DXGI formats Pillow can't open -> the same block format as UNORM (the bits are identical)
+_DX10_SRGB = {72: 71, 75: 74, 78: 77, 99: 98, 29: 28, 91: 87, 93: 88}
+
+
 def load_image(data: bytes) -> Image.Image:
+    if data[:4] == b"DDS " and data[84:88] == b"DX10" and len(data) >= 148:
+        fmt = struct.unpack_from("<I", data, 128)[0]
+        if fmt in _DX10_SRGB:
+            data = data[:128] + struct.pack("<I", _DX10_SRGB[fmt]) + data[132:]
     im = Image.open(io.BytesIO(data))
     im.load()
     return im.convert("RGBA")

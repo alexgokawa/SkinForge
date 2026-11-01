@@ -44,7 +44,8 @@ and choose **Pin to taskbar**.
    ship paint templates. You can also click **Choose .scs…** and pick the author's
    **Open Definition** file (for example Jon Ruda's trailer pack Open Definition).
 3. **Export the templates.** In the vehicle list, click **Templates** next to the
-   trailer. The template images are saved in your project folder.
+   trailer. The template images are saved in `Documents\SkinForge\Templates\ATS` (or `ETS2`),
+   one folder per truck or trailer, shared by all your projects.
 4. **Paint.** Open the template in your paint program (Photoshop, Affinity, GIMP,
    Paint.NET…). Paint your design and export it as a **PNG at the same size**.
    * Transparent areas take the paint colour the player picks in the shop.
@@ -130,12 +131,76 @@ templates itself from the game's 3D models, with labels like *BACK WALL*, *ROOF*
 the same way. They show under **Mod trucks** and **Mod trailers**. Add the vehicle's
 main pack too, because the Open Definition has no 3D models.
 
+**AI traffic** (game folder): every SCS truck and trailer has two checkboxes in the Slot tab:
+**Ownable** (a paint job you can buy for your own truck / trailer) and **AI traffic** (AI trucks
+drive it / pull it with your livery). Tick one or both. Your art is carried over from the normal
+template onto SCS's AI model, so you only paint once. Lights, glass and chrome stay SCS's own.
+
+**Escort vehicles** (special transport): listed under **Escort vehicles**. SkinForge lays the
+escort's body out again, like the escort templates skin authors make by hand: LEFT SIDE, RIGHT
+SIDE, ROOF / HOOD, FRONT and REAR each get their own space, so lettering reads right on both
+sides. The grey "inside" box is the bed and inner panels - a colour is enough there. Each skin
+adds that escort, with your livery, to the vehicles that lead and follow oversize loads. The
+first skin of each escort also replaces SCS's own escort of that model, so the escorts SCS
+places itself (front, back, along the route) wear it too. Two mods that do this for the same
+escort: the one higher in the mod manager wins.
+
+**How often your AI vehicles show up** (Mod tab): compared with the SCS truck or trailer they
+are copied from. There are dozens of trucks and trailers in traffic, so at 1x you see yours now
+and then. Use "A lot (10x)" to check a build in game, then set it back before sharing.
+
+**Template folder**: community template sets for SCS's trucks and trailers can replace
+SkinForge's drawn templates. Download them from Trucky:
+
+* ATS: <https://truckymods.io/american-truck-simulator/tools/truck-and-trailer-templates-898150>
+* ETS2: <https://truckymods.io/euro-truck-simulator-2/tools/ets2-truck-and-trailer-templates-947834>
+
+Unzip them anywhere. Click
+**Template folder…** under Sources and pick that folder. Wherever a sheet there matches the
+game's model, the Template view and **Templates** export use it. Matching goes by the shape of
+the sheet's transparent area, not its file name - fully opaque PNGs never match. Building is the
+same either way. The Slot tab says which sheet is used, and has a checkbox to go back to
+SkinForge's labelled template. These sets are their authors' work: SkinForge doesn't ship them.
+
+**Yard signs** (MattVT yards, SneaK's yards): put the yard's sign pack ("EDIT SIGN HERE.scs",
+"SneaKs Master Def.scs") in your mod folder and SkinForge lists every sign under **Yard
+signs**. Drop your image on a sign and build. In the mod manager, load your SkinForge mod
+**above** the sign pack. You don't need to edit the sign pack any more.
+
+**Dumper live floor**: SCS mapped its sides, top and underside onto one area. The template
+says so: the same art shows on every face. A colour, a pattern or one logo works best.
+
+**Yard sign templates**: put a PNG for a sign in your template folder and name it after the
+sign - the texture name (`msdsign.png`) or its name in the list (`Manchester SD sign.png`).
+After adding or renaming PNGs, click ↻ on the Template folder line.
+
+**AI traffic trailers**: SCS trailers with traffic versions have an **AI traffic sheet** at
+the top of their list. It's SCS's company-livery layout: the top half is the side (both sides
+show it), the bottom row holds the ends (box trailer: rear doors, front wall and the roof;
+tankers and dumpers: FRONT / REAR panels in orange boxes). Paint it like any template and build:
+SCS's AI trucks then pull that trailer with your livery. Fill the side band right down to its
+bottom edge. In the sheet's Slot tab you can choose which traffic lengths use it. Leave the
+sheet empty and there's no AI traffic for that trailer.
+
+**AI trucks**: an SCS truck's Slot tab has "AI traffic" - each cab you painted then also
+drives around as an AI truck with your livery. The Mod tab sets how often your AI vehicles
+show up.
+
+**Bodies with their own settings**: on SCS trailers each body (53', 48'...) can have its own
+finish, colour lock and colour (Slot tab → This body · paint job). It then becomes its own
+paint job in the trailer shop, offered only on that body.
+
+**Player company logos** (Logos & yard signs → Player company logos): your logo replaces one
+of the game's company logos (the first eight). Any square PNG works - it's resized to the
+game's size (128 × 128 in ATS); keep the design bold. Only one company-logo mod can be active.
+
 ---
 
 ## 7. Paint colour per template
 
 The **Custom** button above the preview does two things: it shows a colour under your
-art, and it saves that colour as this template's own paint colour. That colour
+art, and it saves that colour as this template's own paint colour (paste a hex code like
+`#1a2b3c`, or use the eyedropper to pick a colour anywhere on screen). That colour
 replaces the one in the Paint job tab. **Color** resets it to the Paint job tab colour.
 **None** shows a checkerboard, so you can see which parts of your art are transparent.
 

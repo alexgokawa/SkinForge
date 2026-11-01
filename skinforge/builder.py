@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from PIL import Image, ImageDraw, ImageFont
 
 from . import texture as T
-from .logos import GROUP_ID as LOGO_GROUP, LOGO_SIZE, texture_paths as logo_texture_paths
+from .logos import GROUP_ID as LOGO_GROUP, LOGO_SIZE, is_tex, texture_paths as logo_texture_paths
 
 PROJECT_VERSION = 2
 ART_FIELDS = ("art", "overrides", "upright", "color")   # per skin; everything else in slots[key] is shared
@@ -41,7 +41,8 @@ DEFAULT_PROJECT = {
     "resolution": 4096,
     "res_by_vehicle": {},
     "finish_by_vehicle": {},      # id -> "gloss+matte" etc. (overrides "finish")
-    "lock_by_vehicle": {},        # id -> true / false (overrides "color_locked")         # truck / trailer / car id -> 2048 / 4096 / 8192 (overrides "resolution")
+    "lock_by_vehicle": {},
+    "traffic_by_vehicle": {},     # SCS truck id -> "own" (default) / "ai" / "both": paint job and/or AI traffic        # id -> true / false (overrides "color_locked")         # truck / trailer / car id -> 2048 / 4096 / 8192 (overrides "resolution")
     "template_size": "",         # template export size: "" = texture size, or 2048 / 4096 / 8192
     "truck_uvset": "normal",     # normal | both (also ship alternate-UV-set units for trucks)
     "sources": [],
@@ -99,7 +100,7 @@ def skin(p, sid=None):
 
 
 def art_ns(key, sid):
-    return "" if key.startswith(LOGO_GROUP + "/") else sid
+    return "" if is_tex(key) else sid
 
 
 def art_cfg(p, key, sid=None, create=False) -> dict:
@@ -118,6 +119,8 @@ def slot_view(p, key, sid=None) -> dict:
 
 def color_key(slot) -> str:
     """Where a slot's own base colour is stored: SCS parts share their trailer's paint job."""
+    if slot.kind == "scs" and (getattr(slot, "cab", False) or getattr(slot, "body", False)):
+        return slot.key          # a cab / a trailer body can be its own paint job: its own colour
     return f"@scs/{slot.trailer}" if slot.kind == "scs" else slot.key
 
 
@@ -238,6 +241,16 @@ FIN_NAME = {"g": "", "m": " Metallic", "t": " Matte"}
 MATTE_TOBJ = "/vehicle/truck/upgrade/paintjob/skinforge_matte.tobj"   # shared by every SkinForge mod (same content)
 
 
+SKIN_OPTS = ("finish", "metallic", "color_locked", "finish_by_vehicle", "lock_by_vehicle", "traffic_by_vehicle",
+             "finish_by_slot", "lock_by_slot", "traffic_by_slot", "ai_lengths")
+
+
+def skin_opts(p, sid=None) -> dict:
+    """A skin's paint job options: its own (skin["opts"]) where set, else the project's."""
+    o = skin(p, sid).get("opts") or {}
+    return {k: (o[k] if k in o else p.get(k)) for k in SKIN_OPTS}
+
+
 def finish_codes(p) -> list:
     """Project finish ("gloss", "metallic", "matte", "both" or e.g. "gloss+matte") -> ["g", "m", "t"] subset."""
     f = str(p.get("finish") or "both").lower()
@@ -255,6 +268,14 @@ def matte_dds() -> bytes:
 
 
 # --- build -------------------------------------------------------------------
+def _hex_rgba(h):
+    h = (h or "#9a9a9a").lstrip("#")
+    try:
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 255)
+    except (ValueError, IndexError):
+        return (154, 154, 154, 255)
+
+
 def build(project: dict, project_dir: str, trailers: list, out_path: str, progress=None,
           compose=None) -> BuildResult:
     """compose = (signature(key, skin) -> str, apply(key, image, skin) -> image): upright-sheet pieces."""
@@ -270,19 +291,50 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
     warnings = []
     files: dict[str, bytes] = {}
     tex_cache: dict[str, str] = {}   # art hash -> dds game path
+    tex_images: dict = {}            # dds game path -> final PIL image
+    ai_cab_jobs = []                 # (truck id, cab slot, skin id, skin name, cab dds, colour)
+    ai_trailer_jobs = []             # (trailer id, part slots, {slot key: dds}, skin id, skin name, colour)
     units = []
 
-    finishes = finish_codes(p)
-    fin_by_vehicle = {k: v for k, v in (p.get("finish_by_vehicle") or {}).items() if v}
-    lock_by_vehicle = {k: bool(v) for k, v in (p.get("lock_by_vehicle") or {}).items() if v is not None}
+    # finish / colour lock / AI traffic / metallic are per skin (skin "opts", else the project's)
+    cur_sid = [""]
+    _opts_cache = {}
 
-    def fins_of(tid):
-        """Finishes of one truck / trailer / car: its own choice, else the mod's."""
-        v = fin_by_vehicle.get(tid)
-        return finish_codes({"finish": v}) if v else finishes
+    def O():
+        sid = cur_sid[0]
+        if sid not in _opts_cache:
+            o = skin_opts(p, sid)
+            _opts_cache[sid] = {
+                "finishes": finish_codes(o),
+                "fin_v": {k: v for k, v in (o.get("finish_by_vehicle") or {}).items() if v},
+                "lock_v": {k: bool(v) for k, v in (o.get("lock_by_vehicle") or {}).items() if v is not None},
+                "traffic_v": {k: v for k, v in (o.get("traffic_by_vehicle") or {}).items() if v in ("ai", "both")},
+                "fin_s": {k: v for k, v in (o.get("finish_by_slot") or {}).items() if v},
+                "lock_s": {k: bool(v) for k, v in (o.get("lock_by_slot") or {}).items() if v is not None},
+                "traffic_s": {k: v for k, v in (o.get("traffic_by_slot") or {}).items() if v in ("own", "ai", "both")},
+                "locked": bool(o.get("color_locked")),
+                "metallic": {**DEFAULT_PROJECT["metallic"], **(o.get("metallic") or {})},
+                "ai_lengths": {k: set(v) for k, v in (o.get("ai_lengths") or {}).items() if isinstance(v, list)},
+            }
+        return _opts_cache[sid]
 
-    def locked_of(tid):
-        return lock_by_vehicle.get(tid, bool(p.get("color_locked")))
+    def fins_of(tid, skey=None):
+        """Finishes of one template (its own paint job): its own choice, else its truck / trailer's,
+        else the skin's."""
+        o = O()
+        v = o["fin_s"].get(skey) if skey else None
+        v = v or o["fin_v"].get(tid)
+        return finish_codes({"finish": v}) if v else o["finishes"]
+
+    def locked_of(tid, skey=None):
+        o = O()
+        if skey and skey in o["lock_s"]:
+            return o["lock_s"][skey]
+        return o["lock_v"].get(tid, o["locked"])
+
+    def traffic_of(tid, skey=None):
+        o = O()
+        return (o["traffic_s"].get(skey) if skey else None) or o["traffic_v"].get(tid, "own")
     matte_used = []
     by_vehicle = {k: int(v) for k, v in (p.get("res_by_vehicle") or {}).items() if v and T.is_pot(int(v))}
 
@@ -327,6 +379,7 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
             im = compose[1](key, im, sid)
         say(f"Compressing {os.path.basename(fp)} ({out_size[0]}x{out_size[1]} DXT5)…")
         dds_path = f"{game_dir}/{stem}.dds"
+        tex_images[dds_path] = im          # kept for the AI-traffic transfer
         files[dds_path] = T.encode_dds_dxt5(im)
         files[dds_path[:-4] + ".tobj"] = T.make_tobj(dds_path)
         tex_cache[h] = dds_path
@@ -343,7 +396,6 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
         blank_cache[game_dir] = dds_path
         return dds_path
 
-    metallic = p["metallic"]
     uv_both = p.get("truck_uvset", "normal") == "both"
     built = p.setdefault("built", {})
 
@@ -360,7 +412,8 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
             return slot.suitable_for
         return list(cabs) + [x for x in slot.suitable_for if not x.endswith(".cabin")]
 
-    def unit_text(slot, token, name, fin, alt_uv, mask_tobj, scs=False, icon=None, color=None):
+    def unit_text(slot, token, name, fin, alt_uv, mask_tobj, scs=False, icon=None, color=None, skey=None, suit=None):
+        metallic = O()["metallic"]
         body = [
             f"accessory_paint_job_data : {token}.{slot.trailer}.paint_job",
             "{",
@@ -372,7 +425,7 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
             "\tstock: false",
             f"\talternate_uvset: {'true' if alt_uv else 'false'}",
             f"\tbase_color: {sii_color(color or p['base_color'])}",
-            f"\tbase_color_locked: {'true' if locked_of(slot.trailer) else 'false'}",
+            f"\tbase_color_locked: {'true' if locked_of(slot.trailer, skey) else 'false'}",
         ]
         if fin == "t":
             matte_used.append(token)
@@ -388,9 +441,9 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
             body += [
                 "\tflipflake: true",
                 f"\tflake_color: {sii_color(metallic['flake_color'])}",
-                f"\tflake_color_locked: {'true' if locked_of(slot.trailer) else 'false'}",
+                f"\tflake_color_locked: {'true' if locked_of(slot.trailer, skey) else 'false'}",
                 f"\tflip_color: {sii_color(metallic['flip_color'])}",
-                f"\tflip_color_locked: {'true' if locked_of(slot.trailer) else 'false'}",   # a locked paint job locks every colour
+                f"\tflip_color_locked: {'true' if locked_of(slot.trailer, skey) else 'false'}",   # a locked paint job locks every colour
                 f"\tflip_strength: {float(metallic['flip_strength']):.3f}",
                 f"\tflake_density: {float(metallic['flake_density']):.3f}",
                 f"\tflake_shininess: {float(metallic['flake_shininess']):.3f}",
@@ -407,8 +460,67 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
             body += [f'\tsuitable_for[]: "{x}"' for x in suitable(slot)]
         elif getattr(slot, "cab", False):
             body += [f'\tsuitable_for[]: "{x}"' for x in slot.cabin_units]
+        elif suit:   # SCS / mod trailer body with its own paint job (Jon Ruda style: "<body>.<trailer>.body")
+            body += [f'\tsuitable_for[]: "{x}"' for x in suit]
         body.append("}")
         return ("SiiNunit\n{\n" + "\n".join(body) + "\n}\n").encode("utf-8")
+
+    def body_units(sl, tid):
+        """suitable_for names of a body slot: acc "body.dryvan_53" -> "dryvan_53.scs.box.body"."""
+        return [f"{a.split('.', 1)[1]}.{tid}.body" for a in sl.acc_list if a.startswith("body.")]
+
+    def scs_trailer_jobs(tid, parts, all_parts, gkey, color, block_of, part_dds, part_art, main_trailer,
+                         root_dir, sid, sk, sname, icon, pre):
+        """SCS / mod trailer: one paint job for the whole trailer, plus one paint job per body that has
+        its own finish / colour lock / AI traffic / colour (suitable_for = that body, like Jon Ruda's
+        per-length paint jobs). The shared one then only offers the other bodies."""
+        o = O()
+        bodies = [b for b in parts if getattr(b, "body", False) and body_units(b, tid)]
+        own = [b for b in bodies if b.key in o["fin_s"] or b.key in o["lock_s"] or cfg_of(b.key).get("color")]
+        own_keys = {b.key for b in own}
+        rest_bodies = [b for b in bodies if b.key not in own_keys]
+        others = [sl for sl in parts if not getattr(sl, "body", False) or sl.key not in own_keys]
+        part_blocks = [block_of[sl.key] for sl in others if sl.key in block_of]
+        jobs = [(None, gkey, part_blocks, [sl for sl in others], [u for b in rest_bodies for u in body_units(b, tid)]
+                 if own else None)]
+        non_body = [block_of[sl.key] for sl in parts if not getattr(sl, "body", False) and sl.key in block_of]
+        for b in own:
+            blk = ([block_of[b.key]] if b.key in block_of else []) + non_body
+            jobs.append((b, f"{gkey}/{b.token}", blk, [b] + [sl for sl in parts if not getattr(sl, "body", False)],
+                         body_units(b, tid)))
+        main = main_trailer or blank_texture(root_dir)
+        # AI traffic: the AI traffic sheet (company livery layout) goes on SCS's traffic trailers of this
+        # type whenever it has artwork - no tick needed; the sheet's length boxes pick the lengths
+        sheet_rel = cfg_of(f"{tid}/ai_sheet").get("art")
+        if sheet_rel:
+            ai_trailer_jobs.append((tid, o["ai_lengths"].get(tid), sheet_rel, sid, sname, color))
+        for body, ukey, blk, job_parts, suit in jobs:
+            anchor = body if body is not None else all_parts[0]
+            has_art = any(sl.key in part_dds for sl in job_parts)
+            shipped = any(v == pre + ukey for v in built.values())
+            skey = body.key if body is not None else None
+            jcolor = (cfg_of(body.key).get("color") if body is not None else None) or color
+            if not has_art and not shipped:
+                continue           # nothing painted for this paint job (and it never shipped)
+            n = assign_id(p, pre + ukey)
+            text = ("SiiNunit\n{\n" + "\n\n".join(
+                f"simple_paint_job_data : .ovr{i}\n" + b for i, b in enumerate(blk)) + "\n}\n").encode("utf-8") if blk else None
+            if not has_art and main.endswith("/blank.dds"):
+                warnings.append(f"{sname}: {tid}{' ' + body.label if body else ''}: no artwork, but it shipped "
+                                f"before - kept as plain colour so existing saves don't crash")
+            per_key[pre + ukey] = (anchor, main[:-4] + ".tobj", text, sk, jcolor)
+            vfins = fins_of(tid, skey)
+            for fin in vfins:
+                token = f"{code}{n:02d}{FIN_SUFFIX[fin]}"
+                name = sname + (f" {body.label}" if body is not None else "") + \
+                    (FIN_NAME[fin] if len(vfins) > 1 and fin != "g" else "")
+                files[pj_path(anchor, token)] = unit_text(anchor, token, name, fin, False, main[:-4] + ".tobj",
+                                                          scs=True, icon=icon, color=jcolor, skey=skey, suit=suit)
+                if text:
+                    files[pj_path(anchor, token, acc=True)] = text
+                units.append({"token": token, "trailer": tid,
+                              "slot": (body.label + " + " if body is not None else "") + f"{len(blk)} parts", "name": name})
+                built[token] = pre + ukey
 
     def split(v):
         """built value -> (skin id, slot key)"""
@@ -421,29 +533,47 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
 
     # logos: texture replacements, shared by every skin
     for key, cfg in sorted(p["skin_art"].get("", {}).items()):
-        if not key.startswith(LOGO_GROUP + "/") or not cfg.get("art"):
+        if not is_tex(key) or not cfg.get("art"):
             continue
         role = key.split("/", 1)[1]
         with open(art_path(cfg["art"]), "rb") as f:
             im = T.load_image(f.read())
         from .logos import size_for
+        from . import signs, player_logos
+        if player_logos.is_role(role):
+            # replaces the game's own company logo: mat + tobj + uncompressed UI dds (MS2's recipe)
+            sz = size_for(role)
+            if not sz:   # game files not readable: keep the art's shape, power of two, max 512
+                p2 = lambda v: 1 << max(5, min(9, int(v).bit_length() - 1))
+                sz = (p2(im.size[0]), p2(im.size[1]))
+            lim = _fit_contain(im, sz[0]) if sz[0] == sz[1] else T.fit_art(im, sz)
+            say(f"Company logo {player_logos.index(role) + 1}…")
+            files.update(player_logos.files_for(role, T.encode_dds_bgra(lim), T.make_tobj))
+            units.append({"token": role, "trailer": "player_company", "slot": "company logo",
+                          "name": player_logos.dds_path(player_logos.index(role))})
+            continue
         lw, lh = size_for(role)
-        im = _fit_contain(im, lw) if lw == lh else T.fit_art(im, (lw, lh))
-        say(f"Compressing logo {role}…")
-        dds = T.encode_dds_dxt5(im)
+        sign = signs.is_role(role)
+        # logos sit centred on a transparent square; a sign fills its whole texture
+        im = _fit_contain(im, lw) if (lw == lh and not sign) else T.fit_art(im, (lw, lh))
+        say(f"Compressing {'sign' if sign else 'logo'} {role}…")
+        # signs keep the pack's own colour space (SneaK / MattVT ship sRGB DX10 textures)
+        dds = T.encode_dds_dxt5(im, srgb=bool(sign and signs.DETECTED[role].get("srgb")))
         for tid, _name, path in logo_texture_paths(role):
             files[path] = dds
-            units.append({"token": role, "trailer": tid, "slot": "logo texture", "name": path})
+            units.append({"token": role, "trailer": tid, "slot": "sign texture" if sign else "logo texture", "name": path})
 
     per_key = {}   # namespaced key -> (slot, mask_tobj, ovr_text, skin)
+    ai_jobs = {}   # AI slot key -> [(skin id, skin name, art, colour)]
     shipped_skins = {split(v)[0] for v in built.values()}
     for sk in p["skins"]:
         sid = sk["id"]
+        cur_sid[0] = sid
         if sk.get("deleted") and sid not in shipped_skins:
             continue
         pre = f"{sid}|" if sid else ""
         arts = {} if sk.get("deleted") else {k: c for k, c in p["skin_art"].get(sid, {}).items()
-                                              if not k.startswith(LOGO_GROUP + "/")}
+                                              if not is_tex(k)}
         icon = code if not sid else f"{code}_{sid}"
         sname = sk.get("name") or "Skin"
         if len([x for x in p["skins"] if not x.get("deleted")]) > 1 or sid:
@@ -462,10 +592,16 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
         # SCS base-game trailers: one paint job per trailer, one texture per part (key "@scs/<trailer>")
         scs_trailers = []
         for k in emit:
-            tid = k[5:].split("/")[0] if k.startswith("@scs/") else (slots_by_key[k].trailer if k in slots_by_key and slots_by_key[k].kind == "scs" else None)
+            tid = k[5:].split("/")[0] if k.startswith("@scs/") else (slots_by_key[k].trailer if k in slots_by_key and slots_by_key[k].kind in ("scs", "ai_sheet") else None)
             if tid and tid not in scs_trailers:
                 scs_trailers.append(tid)
-        emit = [k for k in emit if not k.startswith("@scs/") and not (k in slots_by_key and slots_by_key[k].kind == "scs")]
+        emit = [k for k in emit if not k.startswith("@scs/") and not (k in slots_by_key and slots_by_key[k].kind in ("scs", "ai_sheet"))]
+        # AI traffic: one extra look per skin on a copy of the AI model (built after all skins)
+        for k in emit:
+            sl = slots_by_key.get(k)
+            if sl is not None and sl.kind in ("ai", "ai_trailer", "ai_escort") and cfg_of(k).get("art"):
+                ai_jobs.setdefault(k, []).append((sid, sname, cfg_of(k)["art"], cfg_of(k).get("color")))
+        emit = [k for k in emit if not (k in slots_by_key and slots_by_key[k].kind in ("ai", "ai_trailer", "ai_escort"))]
 
         # parts textures (overrides) are usually shared by every template of one vehicle
         # (Pete 389: headache rack / rear bumper / rear fenders), so art given once is reused
@@ -519,7 +655,7 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
 
             uv_variants = [False] + ([True] if (uv_both and slot.kind == "truck") else [])
             for alt_uv in uv_variants:
-                vfins = fins_of(slot.trailer)
+                vfins = fins_of(slot.trailer, slot.key)
                 for fin in vfins:
                     token = f"{code}{n:02d}{FIN_SUFFIX[fin]}{'u' if alt_uv else ''}"
                     if len(token) > 12:
@@ -530,7 +666,7 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
                     if alt_uv:
                         name += " (Alt UV)"
                     files[pj_path(slot, token)] = unit_text(slot, token, name, fin, alt_uv, mask_tobj, icon=icon,
-                                                            color=cfg_of(key).get("color"))
+                                                            color=cfg_of(key).get("color"), skey=slot.key)
                     if ovr_text:
                         files[pj_path(slot, token, acc=True)] = ovr_text
                     units.append({"token": token, "trailer": slot.trailer, "slot": slot.label, "name": name})
@@ -559,13 +695,16 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
             first = min(nums.values())
             root_dir = f"/vehicle/{all_parts[0].root}/upgrade/paintjob/{tid.replace('.', '_')}/{code}{first:02d}"
             blocks = []
+            block_of = {}
             main_trailer = None
             part_art = False
+            part_dds = {}
             for sl in parts:
                 rel = cfg_of(sl.key).get("art")
                 size = vsize(tid, sl.tex_size)
                 if rel:
                     dds = make_texture(rel, root_dir, sl.token, sl.key, size, sid=sid)
+                    part_dds[sl.key] = dds
                     part_art = part_art or not sl.main
                 elif sl.main:
                     continue
@@ -589,7 +728,12 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
                 lines += [f'\tacc_list[]: "{a}"' for a in sl.acc_list]
                 lines.append("}")
                 blocks.append("\n".join(lines))
+                block_of[sl.key] = "\n".join(lines[1:])          # without the ".ovrN" name line
             ovr_text = ("SiiNunit\n{\n" + "\n\n".join(blocks) + "\n}\n").encode("utf-8") if blocks else None
+            if not cabs:
+                scs_trailer_jobs(tid, parts, all_parts, gkey, color, block_of, part_dds, part_art, main_trailer,
+                                 root_dir, sid, sk, sname, icon, pre)
+                continue
             for cab, ukey in targets:
                 n = nums[ukey]
                 anchor = cab or all_parts[0]
@@ -602,15 +746,24 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
                 if not part_art and main.endswith("/blank.dds"):
                     warnings.append(f"{sname}: {tid}{' ' + cab.label if cab else ''}: no artwork, but it shipped "
                                     f"before - kept as plain colour so existing saves don't crash")
-                per_key[pre + ukey] = (anchor, main[:-4] + ".tobj", ovr_text, sk, color)
-                vfins = fins_of(tid)
+                ckey = cab.key if cab is not None else None      # a cab is its own paint job
+                ccolor = (cfg_of(cab.key).get("color") if cab is not None else None) or color
+                per_key[pre + ukey] = (anchor, main[:-4] + ".tobj", ovr_text, sk, ccolor)
+                tmode = traffic_of(tid, ckey)
+                if cab is not None and tmode in ("ai", "both") and cfg_of(cab.key).get("art"):
+                    ai_cab_jobs.append((tid, cab, sid, sname, main, ccolor))
+                if cab is None and tmode in ("ai", "both") and part_dds:
+                    ai_trailer_jobs.append((tid, parts, dict(part_dds), sid, sname, color))
+                if tmode == "ai" and not any(v == pre + ukey for v in built.values()):
+                    continue          # AI traffic only: no paint job in the truck shop
+                vfins = fins_of(tid, ckey)
                 for fin in vfins:
                     token = f"{code}{n:02d}{FIN_SUFFIX[fin]}"
                     name = sname + (FIN_NAME[fin] if len(vfins) > 1 and fin != "g" else "")
                     files[pj_path(anchor, token)] = unit_text(anchor, token, name, fin,
                                                               bool(cab is not None and getattr(cab, "alt_uv", False)),
                                                               main[:-4] + ".tobj",
-                                                              scs=True, icon=icon, color=color)
+                                                              scs=True, icon=icon, color=ccolor, skey=ckey)
                     if ovr_text:
                         files[pj_path(anchor, token, acc=True)] = ovr_text
                     units.append({"token": token, "trailer": tid,
@@ -624,6 +777,7 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
         if token in emitted or key not in per_key:
             continue
         slot, mask_tobj, ovr_text, sk, kcolor = per_key[key]
+        cur_sid[0] = sk["id"]
         suffix = re.sub(r"^[a-z0-9_]*?\d+", "", token[len(code):])
         fin = "m" if "m" in suffix else "t" if "t" in suffix else "g"
         alt_uv = token.endswith("u")
@@ -631,7 +785,8 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
         files[pj_path(slot, token)] = unit_text(slot, token, (sk.get("name") or "Skin") + (FIN_NAME[fin] if fin != "g" else "")
                                                 + (" (Alt UV)" if alt_uv else ""), fin, alt_uv, mask_tobj,
                                                 scs=split(key)[1].startswith("@scs/"), icon=code if not sid else f"{code}_{sid}",
-                                                color=kcolor)
+                                                color=kcolor,
+                                                skey=slot.key if (slot.kind != "scs" or getattr(slot, "cab", False)) else None)
         if ovr_text:
             files[pj_path(slot, token, acc=True)] = ovr_text
         kept_alive.append((fin, alt_uv, token))
@@ -645,6 +800,153 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
                                 f"{'s' if len(toks) > 1 else ''} shipped in an earlier build - kept in the mod "
                                 f"so saved games that use them don't break ({', '.join(toks[:4])}"
                                 f"{', …' if len(toks) > 4 else ''})")
+    storages, ai_count = {}, [0]
+    try:   # how often our AI trucks / trailers spawn next to each of SCS's own (spawn_ratio)
+        spawn = max(0.01, min(50.0, float(p.get("ai_spawn") or 1)))
+    except (TypeError, ValueError):
+        spawn = 1.0
+    if ai_cab_jobs:   # SCS trucks ticked "AI traffic": cab art carried over onto SCS's AI truck
+        from . import ai as AI
+        for tid in dict.fromkeys(j[0] for j in ai_cab_jobs):
+            jobs = [j for j in ai_cab_jobs if j[0] == tid]
+            say(f"AI traffic: matching {tid} cabs to its AI models…")
+            try:
+                pairs = AI.pair_cabs(jobs[0][1].game, tid, [j[1] for j in jobs])
+            except Exception as e:
+                warnings.append(f"{tid}: AI traffic left out - {e}")
+                continue
+            if not pairs:
+                warnings.append(f"{tid}: no SCS AI version of this truck in your game files - AI traffic left out")
+                continue
+            for aslot, cab in pairs:
+                skins_out = []
+                for _t, jcab, sid, sname, main, color in jobs:
+                    if jcab is not cab or main not in tex_images:
+                        continue
+                    say(f"AI traffic: {aslot.ai['name']} · {sname} (transfer from {cab.label})…")
+                    fill = _hex_rgba(color or p.get("base_color") or "#9a9a9a")
+                    im = AI.bake_from_cab(aslot, cab, tex_images[main], 2048, fill)
+                    vid = re.sub(r"[^a-z0-9_]", "_", aslot.trailer.split(".", 1)[1])[:40]
+                    dds = f"/vehicle/ai/sf_{code}/{vid}/{sid or 'a'}.dds"
+                    files[dds] = T.encode_dds_dxt5(im)
+                    files[dds[:-4] + ".tobj"] = T.make_tobj(dds)
+                    skins_out.append((sid, sname, dds))
+                if not skins_out:
+                    continue
+                try:
+                    kind, text = AI.build_files(aslot, skins_out, code, files, say, counter=ai_count, spawn=spawn)
+                except Exception as e:
+                    warnings.append(f"{aslot.ai['name']}: AI traffic left out - {e}")
+                    continue
+                storages.setdefault(kind, []).append(text)
+                for sid, sname, _d in skins_out:
+                    units.append({"token": f"sf{code}{sid or 'a'}", "trailer": aslot.trailer, "slot": "AI traffic",
+                                  "name": sname})
+    if ai_trailer_jobs:   # SCS trailers ticked "AI traffic": the AI traffic sheet on SCS's traffic trailers
+        from . import ai as AI
+        for tid in dict.fromkeys(j[0] for j in ai_trailer_jobs):
+            sheet = slots_by_key.get(f"{tid}/{AI.SHEET_TOKEN}")
+            if sheet is None:
+                warnings.append(f"{tid}: SCS has no traffic version of this trailer in your game files - AI traffic left out")
+                continue
+            per_info = {}       # traffic trailer id -> (info, [(skin id, name, dds)])
+            done = set()
+            for _t, lengths, rel, sid, sname, color in ai_trailer_jobs:
+                if _t != tid:
+                    continue
+                infos = [i for i in sheet.traffic
+                         if lengths is None or AI.length_of(i["chassis_path"].rsplit("/", 1)[-1]) in lengths]
+                if not infos:
+                    warnings.append(f"{sname}: {tid}: no traffic length ticked on the AI traffic sheet - AI traffic left out")
+                    continue
+                dds = f"/vehicle/trailer/sf_{code}/{tid.replace('.', '_')}_{sid or 'a'}_ai.dds"
+                if dds not in files:
+                    say(f"AI traffic sheet: {tid} · {sname}…")
+                    with open(art_path(rel), "rb") as f:
+                        im = T.load_image(f.read())
+                    w = min(4096, vres(tid))
+                    im = T.fit_art(im, (w, w // 2))
+                    if im.mode == "RGBA":   # transparent = the paint colour, like a template
+                        bg = Image.new("RGBA", im.size, _hex_rgba(color or p.get("base_color") or "#9a9a9a"))
+                        bg.alpha_composite(im)
+                        im = bg
+                    files[dds] = T.encode_dds_dxt5(im)
+                    files[dds[:-4] + ".tobj"] = T.make_tobj(dds)
+                for info in infos:
+                    if (info["id"], sid) in done:
+                        continue
+                    done.add((info["id"], sid))
+                    per_info.setdefault(info["id"], (info, []))[1].append((sid, sname, dds))
+            model_cache = {}
+            for _id, (info, skins_out) in per_info.items():
+                aslot = AI._ai_slot(sheet.game, info)
+                aslot.kind = "ai_trailer"
+                say(f"AI traffic: {info['name']} - re-mapping the model so the whole sheet shows…")
+                try:
+                    ch = AI.remapped_chassis(sheet.game, info, code, files, model_cache)
+                except Exception as e:
+                    ch = None
+                    warnings.append(f"{info['name']}: model not re-mapped ({e}) - SCS's layout used, the ends may smear")
+                kind, text = AI.build_trailer_files(aslot, skins_out, code, files, ai_count, spawn=spawn, chassis=ch)
+                storages.setdefault(kind, []).append(text)
+                for sid, sname, _d in skins_out:
+                    units.append({"token": f"sf{code}", "trailer": info["id"], "slot": "AI traffic", "name": sname})
+    if ai_jobs:
+        from . import ai as AI
+        for key, jobs in sorted(ai_jobs.items()):
+            slot = slots_by_key[key]
+            vid = re.sub(r"[^a-z0-9_]", "_", slot.trailer.split(".", 1)[1])[:40]
+            skins_out = []
+            for sid, sname, rel, color in jobs:
+                with open(art_path(rel), "rb") as f:
+                    im = T.load_image(f.read())
+                size = (min(2048, vres(slot.trailer)),) * 2 if slot.kind == "ai" else \
+                    (min(4096, vres(slot.trailer)), min(4096, vres(slot.trailer)) // 2) if slot.kind == "ai_escort" else \
+                    vsize(slot.trailer, slot.tex_size)
+                fill = _hex_rgba(color or p.get("base_color") or "#9a9a9a")
+                if slot.kind == "ai_escort":
+                    # the escort's own livery layout (left / right / roof / front / rear): 1:1
+                    bg = Image.new("RGBA", size, fill)
+                    bg.alpha_composite(T.fit_art(im, size))
+                else:
+                    im = T.fit_art(im, size)
+                    # AI bodies have no paint colour of their own: transparent = the skin's base colour
+                    bg = Image.new("RGBA", size, fill)
+                    bg.alpha_composite(im)
+                say(f"Compressing AI {slot.trailer} {sname} ({size[0]}x{size[1]} DXT5)…")
+                dds = (f"/vehicle/ai/sf_{code}/{vid}/{sid or 'a'}.dds" if slot.kind in ("ai", "ai_escort")
+                       else f"/vehicle/trailer/sf_{code}/{vid}_{sid or 'a'}.dds")
+                files[dds] = T.encode_dds_dxt5(bg)
+                files[dds[:-4] + ".tobj"] = T.make_tobj(dds)
+                skins_out.append((sid, sname, dds))
+            try:
+                if slot.kind == "ai_escort":   # one unit per escort role SCS has for it (front / back)
+                    for ekind, eunit, eaccs in slot.ai["escorts"]:
+                        import copy
+                        es = copy.copy(slot)
+                        es.ai = dict(slot.ai, unit=eunit, accs=eaccs, storage=ekind)
+                        k2, t2 = AI.build_files(es, skins_out, code, files, say, counter=ai_count, spawn=spawn)
+                        storages.setdefault(k2, []).append(t2)
+                    kind, text = None, None
+                elif slot.kind == "ai_trailer":
+                    kind, text = AI.build_trailer_files(slot, skins_out, code, files, ai_count, spawn=spawn)
+                else:
+                    kind, text = AI.build_files(slot, skins_out, code, files, say, counter=ai_count, spawn=spawn)
+            except Exception as e:
+                warnings.append(f"{slot.trailer}: AI skin left out - {e}")
+                continue
+            if kind:
+                storages.setdefault(kind, []).append(text)
+            for sid, sname, _d in skins_out:
+                units.append({"token": f"sf{code}{sid or 'a'}", "trailer": slot.trailer, "slot": "AI traffic",
+                              "name": sname})
+    if storages:
+        for kind, texts in storages.items():
+            sui = f"/def/vehicle/ai/sf_{code}_{kind}.sui"
+            files[sui] = ("\n\n".join(texts) + "\n").encode("utf-8")
+            files[f"/def/vehicle/traffic_storage_{kind}.sf_{code}.sii"] = (
+                "SiiNunit\n{\n" + f'@include "ai/sf_{code}_{kind}.sui"' + "\n}\n").encode("utf-8")
+
     if matte_used:   # one flat base texture for every matte paint job in the mod
         files[MATTE_TOBJ[:-5] + ".dds"] = matte_dds()
         files[MATTE_TOBJ] = T.make_tobj(MATTE_TOBJ[:-5] + ".dds")

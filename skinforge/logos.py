@@ -54,8 +54,21 @@ def _known_paths():
     return _KNOWN_PATHS
 
 
+TEX_GROUPS = (GROUP_ID, "yard_signs", "player_logos")
+
+
+def is_tex(key: str) -> bool:
+    """Texture-replacement slot (Jon Ruda logos, yard signs): shared by every skin, no defs."""
+    return key.split("/", 1)[0] in TEX_GROUPS
+
+
 def texture_paths(role: str):
     """[(truck id, truck name, '/vehicle/.../file.dds')] for one role."""
+    from . import signs, player_logos
+    if player_logos.is_role(role):
+        return player_logos.texture_paths(role)
+    if signs.is_role(role):
+        return signs.texture_paths(role)
     if role in DETECTED:
         return list(DETECTED[role]["paths"])
     suffix = dict((r, s) for r, _l, s in ROLES)[role]
@@ -64,6 +77,11 @@ def texture_paths(role: str):
 
 
 def size_for(role: str):
+    from . import signs, player_logos
+    if player_logos.is_role(role):
+        return player_logos.size_for(role)
+    if signs.is_role(role):
+        return signs.size_for(role)
     return tuple(DETECTED[role]["size"]) if role in DETECTED else (LOGO_SIZE, LOGO_SIZE)
 
 

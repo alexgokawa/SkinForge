@@ -38,6 +38,10 @@ async function refresh() {
   const all = slots();
   if (!sel || !all.find((s) => s.key === sel)) sel = all.length ? all[0].key : null;
   render();
+  if (!S.busy && (S.ai_check || (S.official || {}).busy)) {   // background AI template check: the list shrinks as it goes
+    clearTimeout(refresh._a);
+    refresh._a = setTimeout(() => refresh().catch(() => {}), 4000);
+  }
   if (S.busy) {   // game files still being read (app start): check again shortly
     clearTimeout(refresh._t);
     refresh._t = setTimeout(() => refresh().then(() => { if (!S.busy) fit(); }).catch(() => {}), 1200);
@@ -80,6 +84,20 @@ function renderSources() {
     <div class="src" title="${esc(s.path)}"><span class="dot ${s.ok ? "ok" : "bad"}"></span><span class="name">${s.kind === "game" ? "SCS game files · " : ""}${esc(base(s.path) || "scan")}</span>
     ${s.path ? `<button class="x" data-rm="${i}" title="Remove">✕</button>` : ""}</div>
     ${s.ok ? "" : `<div class="src-err">${esc(s.error)}</div>`}`).join("");
+  renderOfficial();
+}
+function officialNote(s) {
+  const o = S.official || {}, f = (o.slots || {})[s.key];
+  if (!o.dir) return `<p class="hint" style="margin:0">Have a folder of paint template PNGs for SCS's trucks and trailers (the community sets on Trucky: truckymods.io, 'truck and trailer templates')? Point <b>Template folder…</b> (Sources) at that folder and the Template view and Export use that sheet wherever it matches this model.</p>`;
+  if (!f) return `<p class="hint" style="margin:0">${o.busy ? "Looking for this part's sheet in your template folder…" : "No sheet in your template folder matches this part - SkinForge's drawn template is used."}</p>`;
+  return `<p class="hint" style="margin:0">Template folder sheet: <b>${esc(f)}</b> (same layout as the game's model).</p>
+    <label class="check"><input type="checkbox" id="officialOff" ${o.off ? "checked" : ""}>Use SkinForge's labelled template instead (FRONT / ROOF / LEFT SIDE…)</label>`;
+}
+function renderOfficial() {
+  const o = S.official || {}, el = $("#officialSrc");
+  if (!el) return;
+  el.innerHTML = o.dir ? `<div class="src" title="${esc(o.dir)}"><span class="dot ${o.found ? "ok" : "bad"}"></span><span class="name">Template folder · ${esc(base(o.dir))}${o.busy ? " · matching…" : ""}</span><button class="x" id="reloadOfficial" title="Reload the folder (after adding, replacing or removing templates in it)">↻</button><button class="x" id="rmOfficial" title="Stop using these">✕</button></div>
+    ${o.found ? "" : `<div class="src-err">Folder not found</div>`}` : "";
 }
 
 // texture size of one truck / trailer / car: its own choice (Slot tab), else the project's
@@ -90,19 +108,58 @@ function texSizeOf(s) {
   const [w, h] = s.tex_size || [res, res];
   return [Math.max(4, Math.round(w * f)), Math.max(4, Math.round(h * f))];
 }
-function vehicleWord(t) { return t.kind === "scs_car" ? "car" : t.kind === "scs" || t.kind === "mod3d" || t.kind === "trailer" ? "trailer" : "truck"; }
+function vehicleWord(t) { return t.kind.startsWith("scs_ai") ? "AI vehicle" : t.kind === "scs_car" ? "car" : t.kind === "scs" || t.kind === "mod3d" || t.kind === "trailer" ? "trailer" : "truck"; }
 // finish / colour lock of one truck / trailer / car: its own choice, else the mod's (Paint job tab)
 function vfinOf(tid) { const v = (S.project.finish_by_vehicle || {})[tid]; return v ? finishesOf({ finish: v }) : finishesOf(S.project); }
 function vlockOf(tid) { const v = (S.project.lock_by_vehicle || {})[tid]; return v === undefined || v === null ? !!S.project.color_locked : !!v; }
+// a template that is its own paint job (author template, a truck's cab sheet): finish, colour lock and
+// AI traffic can be set for it alone; SCS / mod trailer parts share one paint job per trailer
+function ownJob(s) { return s.kind === "trailer" || s.kind === "truck" || (s.kind === "scs" && (!!s.cab || !!s.body)); }
+function sfinOf(s, t) { const v = (S.project.finish_by_slot || {})[s.key]; return v ? finishesOf({ finish: v }) : vfinOf(t.id); }
+function slockOf(s, t) {
+  const v = (S.project.lock_by_slot || {})[s.key];
+  if (v !== undefined && v !== null) return v;
+  const lv = (S.project.lock_by_vehicle || {})[t.id];
+  return lv !== undefined && lv !== null ? lv : !!S.project.color_locked;
+}
+function strafficOf(s, t) { return (S.project.traffic_by_slot || {})[s.key] || trafficOf(t.id); }
+function slotPaintGroup(t, s) {
+  if (!ownJob(s)) return vehiclePaintGroup(t);
+  const ownF = !!(S.project.finish_by_slot || {})[s.key], sl = (S.project.lock_by_slot || {})[s.key];
+  const ownL = sl !== undefined && sl !== null, fins = sfinOf(s, t), w = vehicleWord(t);
+  const what = s.kind === "scs" ? (s.cab ? "cab" : "body") : "template";
+  const vt = (S.project.traffic_by_slot || {})[s.key], cabAi = s.kind === "scs" && t.kind === "scs_truck";
+  const tv = strafficOf(s, t), own = tv !== "ai", ai = tv !== "own";
+  return `<div class="group"><h2>This ${what} · paint job</h2>
+    <div class="field"><span>Finish${ownF ? ` · own · <button class="link" data-sfinreset="${esc(s.key)}">same as the ${w}</button>` : ` · same as the ${w}`}</span><div class="seg">
+      ${[["gloss", "Gloss"], ["metallic", "Metallic"], ["matte", "Matte"]].map(([v, l]) => `<button data-sfin="${v}" class="${fins.includes(v) ? "on" : ""}">${l}</button>`).join("")}</div></div>
+    <label class="field"><span>Paint colour in the shop</span><select data-slock="${esc(s.key)}">
+      ${[["", `Same as the ${w} (${slockOf({ key: "" }, t) ? "locked" : "players can change it"})`], ["0", "Players can change it"], ["1", "Locked"]].map(([v, n]) => `<option value="${v}" ${(ownL ? (sl ? "1" : "0") : "") === v ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+    ${cabAi ? `<div class="field"><span>Use this ${what} as${vt ? ` · own · <button class="link" data-strafficreset="${esc(s.key)}">same as the ${w}</button>` : ` · same as the ${w}`}</span></div>
+    <label class="check"><input type="checkbox" data-straffic="own" ${own ? "checked" : ""}> Ownable ${w} (paint job in the shop)</label>
+    <label class="check"><input type="checkbox" data-straffic="ai" ${ai ? "checked" : ""}> AI traffic (${t.kind === "scs" ? "SCS's AI trucks pull this body with this livery" : "SCS's AI " + esc(t.name) + " with this livery"})</label>` : ""}
+    <small class="hint" style="margin:0">Only for ${esc(s.label)}.${s.body ? ` A body with its own setting here becomes its <b>own paint job</b> in the trailer shop (only offered on that body); the other bodies keep sharing one.` : ""} The paint colour itself: <b>Custom</b> above the preview. Settings for the whole ${w} are below.</small></div>
+    ${vehiclePaintGroup(t)}`;
+}
 function vehiclePaintGroup(t) {
   const w = vehicleWord(t), ownF = !!(S.project.finish_by_vehicle || {})[t.id], lv = (S.project.lock_by_vehicle || {})[t.id];
   const ownL = lv !== undefined && lv !== null, fins = vfinOf(t.id);
   return `<div class="group"><h2>This ${w} · paint job</h2>
-    <div class="field"><span>Finish${ownF ? ` · own · <button class="link" data-vfinreset="${esc(t.id)}">same as the mod</button>` : " · same as the mod"}</span><div class="seg">
+    <div class="field"><span>Finish${ownF ? ` · own · <button class="link" data-vfinreset="${esc(t.id)}">same as the skin</button>` : " · same as the skin"}</span><div class="seg">
       ${[["gloss", "Gloss"], ["metallic", "Metallic"], ["matte", "Matte"]].map(([v, l]) => `<button data-vfin="${v}" data-vt="${esc(t.id)}" class="${fins.includes(v) ? "on" : ""}">${l}</button>`).join("")}</div></div>
     <label class="field"><span>Paint colour in the shop</span><select data-vlock="${esc(t.id)}">
-      ${[["", `Same as the mod (${S.project.color_locked ? "locked" : "players can change it"})`], ["0", "Players can change it"], ["1", "Locked"]].map(([v, n]) => `<option value="${v}" ${(ownL ? (lv ? "1" : "0") : "") === v ? "selected" : ""}>${n}</option>`).join("")}</select></label>
-    <small class="hint" style="margin:0">Only for ${esc(t.name)} - e.g. a matte, locked truck with gloss trailers you can recolour. The Paint job tab is the default for everything else.</small></div>`;
+      ${[["", `Same as the skin (${S.project.color_locked ? "locked" : "players can change it"})`], ["0", "Players can change it"], ["1", "Locked"]].map(([v, n]) => `<option value="${v}" ${(ownL ? (lv ? "1" : "0") : "") === v ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+    <small class="hint" style="margin:0">Only for ${esc(t.name)} - e.g. a matte, locked truck with gloss trailers you can recolour. The Paint job tab is the default for everything else. Settings here are for the skin you're editing.</small></div>${trafficGroup(t)}`;
+}
+// SCS trucks: the cab art as an ownable paint job and/or on SCS's AI version of the truck
+function trafficOf(tid) { return (S.project.traffic_by_vehicle || {})[tid] || "own"; }
+function trafficGroup(t) {
+  if (t.kind !== "scs_truck") return "";   // SCS trailers: the AI traffic sheet in their list is the AI livery
+  const v = trafficOf(t.id), own = v !== "ai", ai = v !== "own", tr = t.kind === "scs", w = tr ? "trailer" : "truck";
+  return `<div class="group"><h2>This ${w} · use the skin as</h2>
+    <label class="check"><input type="checkbox" data-traffic="own" data-vt="${esc(t.id)}" ${own ? "checked" : ""}> Ownable ${w} (paint job in the ${w} shop)</label>
+    <label class="check"><input type="checkbox" data-traffic="ai" data-vt="${esc(t.id)}" ${ai ? "checked" : ""}> AI traffic (SCS's AI ${tr ? "trucks pull this trailer" : esc(t.name) + " drives around"} with this livery)</label>
+    <small class="hint" style="margin:0">${tr ? `AI traffic: SCS's traffic trailers use their own company-livery layout, so they get their own sheet - <b>AI traffic sheet</b> in this trailer's list (shown once AI traffic is ticked). Paint it like SCS's company liveries: top half = both sides, bottom = front wall and rear doors. Every traffic length uses that one sheet.` : `AI traffic: SkinForge carries your art over onto SCS's AI version of this truck when building (matched in 3D - you only paint the normal templates). Each cab you painted becomes an AI truck in traffic that pulls trailers.`} Parts the AI model has that your templates don't cover take the paint colour.</small></div>`;
 }
 // "· 8K · matte · locked" in a vehicle's list header when it has its own settings
 function vehicleTags(t) {
@@ -111,6 +168,10 @@ function vehicleTags(t) {
   if ((P.finish_by_vehicle || {})[t.id]) out.push(vfinOf(t.id).join("+"));
   const lv = (P.lock_by_vehicle || {})[t.id];
   if (lv !== undefined && lv !== null) out.push(lv ? "locked" : "colour free");
+  const tv = (P.traffic_by_vehicle || {})[t.id];
+  if (tv && t.kind === "scs_truck") out.push(tv === "ai" ? "AI traffic only" : "+ AI traffic");
+  const sh = t.slots.find((x) => x.kind === "ai_sheet");
+  if (sh && cfgOf(sh.key).art) out.push("+ AI traffic");
   return out.length ? ` · <b class="vtag">${esc(out.join(" · "))}</b>` : "";
 }
 function vresNote(t) {
@@ -131,22 +192,49 @@ function thumbUrl(key, ovr = -1, size = 96) {
 function renderTrailers() {
   const el = $("#trailers");
   if (!S.trailers.length) { el.innerHTML = S.sources.some((s) => s.ok) ? `<p class="hint">No trailers with template paint jobs found in this pack.</p>` : ""; return; }
-  const kinds = { trailer: "Trailers", truck: "Trucks", logo: "Logos", scs: "SCS trailers", scs_truck: "SCS trucks", mod3d: "Mod trailers · templates from 3D models", mod3d_truck: "Mod trucks · templates from 3D models", scs_car: "Road Trip cars" };
-  let lastKind = null;
-  el.innerHTML = S.trailers.map((t) => {
+  const kinds = { trailer: "Trailers", truck: "Trucks", logo: "Logos & yard signs", scs: "SCS trailers", scs_truck: "SCS trucks", mod3d: "Mod trailers · templates from 3D models", mod3d_truck: "Mod trucks · templates from 3D models", scs_car: "Road Trip cars", scs_ai: "AI traffic · cars, vans, work trucks, buses", scs_ai_truck: "AI traffic · semi trucks", scs_ai_trailer: "AI traffic · trailers", scs_escort: "Escort vehicles · special transport" };
+  // one collapsible section per category (SCS trucks, AI traffic, ...), closed by default,
+  // remembered per project like the vehicle groups (ids "kind:<kind>")
+  const cats = [];
+  for (const t of S.trailers) {
+    let c = cats.find((x) => x.kind === t.kind);
+    if (!c) cats.push(c = { kind: t.kind, list: [] });
+    c.list.push(t);
+  }
+  el.innerHTML = cats.map((c) => {
+    const id = "kind:" + c.kind, isOpen = !!(opened && opened.has(id));
+    const painted = c.list.reduce((a, t) => a + t.slots.filter((s) => cfgOf(s.key).art).length, 0);
+    const loaded = c.list.filter((t) => !t.lazy).length;
+    const sub = `${c.list.length} ${c.list.length === 1 ? "item" : "items"}${loaded < c.list.length ? ` · ${loaded} loaded` : ""}${painted ? ` · <b class="vtag">${painted} painted</b>` : ""}`;
+    return `<div class="cat ${isOpen ? "" : "closed"}"><div class="cat-h" data-toggle="${esc(id)}"><span class="chev">${isOpen ? "▾" : "▸"}</span><h2>${kinds[c.kind] || c.kind}</h2><small>${sub}</small></div>
+      ${isOpen ? `<div class="cat-b">${c.list.map(groupHtml).join("")}</div>` : ""}</div>`;
+  }).join("");
+}
+
+function bodiesOnly(t) { return !!(S.project.bodies_only || {})[t.id] && t.slots.some((x) => x.body); }
+function aiOn(t) {   // AI traffic ticked for this trailer or one of its bodies (this skin)
+  const ts = S.project.traffic_by_slot || {};
+  return trafficOf(t.id) !== "own" || t.slots.some((x) => ts[x.key] && ts[x.key] !== "own");
+}
+function shownSlots(t) {   // "Bodies only": parts are left out (they take the paint colour) unless they have art
+  let out = bodiesOnly(t) ? t.slots.filter((x) => x.body || x.kind === "ai_sheet" || cfgOf(x.key).art) : t.slots;
+  return out;
+}
+function groupHtml(t) {
+  {
     const done = t.slots.filter((s) => cfgOf(s.key).art).length;
     const open = t.lazy ? false : !!(opened && opened.has(t.id));
-    const head = t.kind !== lastKind ? `<h2 class="kind-h">${kinds[t.kind] || ""}</h2>` : "";
-    lastKind = t.kind;
+    const head = "";
     if (t.lazy || t.error) return `${head}<div class="trailer closed">
       <div class="trailer-h"><span class="chev">▸</span><div class="t"><b>${esc(t.name)}</b><small>${t.error ? esc(t.error) : "not loaded · Load reads its models once"}</small></div>
-        ${t.lazy ? `<button class="small" data-loadtruck="${esc(t.id)}" data-vk="${t.kind === "scs" ? "trailer" : t.kind === "scs_car" ? "car" : "truck"}" title="Read this ${t.kind === "scs" ? "trailer's bodies and parts" : t.kind === "scs_car" ? "car's body" : "truck's cabs and parts"} from its 3D models (the first time can take a minute)">Load</button>` : ""}</div></div>`;
+        ${t.lazy ? `<button class="small" data-loadtruck="${esc(t.id)}" data-vk="${t.kind === "scs" ? "trailer" : t.kind === "scs_car" ? "car" : t.kind.startsWith("scs_ai") || t.kind === "scs_escort" ? "ai" : "truck"}" title="Read this ${t.kind === "scs" ? "trailer's bodies and parts" : t.kind === "scs_car" ? "car's body" : t.kind.startsWith("scs_ai") ? "AI vehicle's body" : "truck's cabs and parts"} from its 3D models (the first time can take a minute)">Load</button>` : ""}</div></div>`;
     return `${head}<div class="trailer ${open ? "" : "closed"}">
-      <div class="trailer-h" data-toggle="${esc(t.id)}"><span class="chev">${open ? "▾" : "▸"}</span><div class="t"><b>${esc(t.name)}</b><small>${t.kind === "logo" ? "texture replacement · 6 trucks" : t.kind === "scs" || t.kind === "mod3d" ? esc(t.id) + " · " + t.slots.length + " parts · one paint job" : t.kind === "scs_car" ? esc(t.id) + " · one body sheet" : t.kind === "scs_truck" || t.kind === "mod3d_truck" ? esc(t.id) + " · " + t.slots.filter((x) => x.cab).length + " cabs + " + t.slots.filter((x) => !x.cab).length + " parts" : esc(t.id) + " · " + t.slots.length + " template" + (t.slots.length > 1 ? "s" : "")}${t.kind === "logo" ? "" : vehicleTags(t)}</small></div>
-        <span class="count ${done === t.slots.length ? "done" : ""}">${done}/${t.slots.length}</span>
-        ${t.kind === "logo" ? `<button class="small ghost" id="importLogos" title="Take the logos from an existing logo mod (.scs)">Import…</button>` : ""}
-        ${t.kind !== "logo" || t.slots.some((x) => x.has_template) ? `<button class="small ghost" data-tmpl="${esc(t.id)}" title="Export painting templates">Templates</button>` : ""}</div>
-      ${!open ? "" : t.slots.map((s) => {
+      <div class="trailer-h" data-toggle="${esc(t.id)}"><span class="chev">${open ? "▾" : "▸"}</span><div class="t"><b>${esc(t.name)}</b><small>${t.id === "player_logos" ? "your own company's logo · replaces the game's logos 1-" + t.slots.length : t.id === "yard_signs" ? "texture replacement · " + t.slots.length + " sign" + (t.slots.length > 1 ? "s" : "") + " · load above the yard mods" : t.kind === "logo" ? "texture replacement · 6 trucks" : t.kind === "scs" || t.kind === "mod3d" ? esc(t.id) + " · " + t.slots.length + " parts · one paint job" + (t.hidden_parts ? ` · ${t.hidden_parts} empty part${t.hidden_parts > 1 ? "s" : ""} hidden (paint colour)` : "") : t.kind === "scs_car" ? esc(t.id) + " · one body sheet" : t.kind === "scs_ai_trailer" ? "AI trailer · one sheet · each skin adds a trailer to traffic" : t.kind === "scs_escort" ? "escort · left / right / roof / front / rear · each skin adds an escort vehicle" : t.kind.startsWith("scs_ai") ? "AI traffic · one sheet · each skin adds a vehicle to traffic" : t.kind === "scs_truck" || t.kind === "mod3d_truck" ? esc(t.id) + " · " + t.slots.filter((x) => x.cab).length + " cabs + " + t.slots.filter((x) => !x.cab).length + " parts" : esc(t.id) + " · " + t.slots.length + " template" + (t.slots.length > 1 ? "s" : "")}${t.kind === "logo" ? "" : vehicleTags(t)}</small></div>
+        <span class="acts"><span class="count ${done === t.slots.length ? "done" : ""}">${done}/${t.slots.length}</span>
+        ${t.id === "ruda_logos" ? `<button class="small ghost" id="importLogos" title="Take the logos from an existing logo mod (.scs)">Import…</button>` : ""}
+        ${t.slots.some((x) => x.body) && t.slots.some((x) => !x.body) ? `<button class="small ghost ${bodiesOnly(t) ? "on" : ""}" data-bodies="${esc(t.id)}" title="${bodiesOnly(t) ? "Showing only the body sheets - click to show every part again" : "Show only the body sheets (parts you don't paint take the paint colour)"}">${bodiesOnly(t) ? "Bodies only ✓" : "Bodies only"}</button>` : ""}
+        ${t.kind !== "logo" || t.slots.some((x) => x.has_template) ? `<button class="small ghost" data-tmpl="${esc(t.id)}" title="Choose which painting templates to export">Templates</button>` : ""}</span></div>
+      ${!open ? "" : shownSlots(t).map((s) => {
         const has = !!cfgOf(s.key).art;
         return `<div class="slot ${s.key === sel ? "sel" : ""}" data-key="${esc(s.key)}">
           <img loading="lazy" src="${has ? thumbUrl(s.key) : thumbUrl(s.key, -1, 96).replace("mode=clean", "mode=template")}" alt="">
@@ -154,7 +242,7 @@ function renderTrailers() {
           <span class="dot ${has ? "ok" : cabState(s) === "broken" ? "part" : "none"}" title="${has ? "Artwork assigned" : "No artwork yet"}"></span></div>`;
       }).join("")}
     </div>`;
-  }).join("");
+  }
 }
 
 function partName(o) {
@@ -173,7 +261,7 @@ let picking = false;
 let pickBusy = false;
 const OPS = { v: "Flip vertical", h: "Flip horizontal", r: "Rotate 180°" };
 function flipsGroup(s, t, cfg, logo) {
-  if (logo || !s.has_template || s.kind === "scs") return "";
+  if (logo || !s.has_template || s.kind === "scs" || s.kind === "ai_sheet") return "";
   const marks = cfg.flips || [];
   const others = t.slots.filter((x) => x.key !== s.key && x.has_template);
   return `<div class="group"><h2>Mirrored pieces</h2>
@@ -240,7 +328,7 @@ function vramNote(p) {
     On an 8 GB card keep 8K for one or two hero trucks, not a whole fleet or traffic; too many can stutter or blur when the game runs out of VRAM. Builds also take longer.</span></div>`;
 }
 function uniqNames(s) { return [...new Set(s.targets.map((x) => x.name))]; }
-// expanded vehicle groups: closed by default, remembered in SkinForge's settings (the app
+// expanded vehicle groups: closed by default, remembered per project (the app
 // window's browser storage is lost on every start - new port each time)
 let opened = null;
 function setOpen(id, on) {
@@ -255,6 +343,7 @@ function renderStage() {
   $("#emptyStage").hidden = !!s;
   $("#previewImg").hidden = !s;
   $("#stageTitle").textContent = s ? `${trailerOf(sel).name} - ${s.label}` : "";
+  $("#stageTitle").title = $("#stageTitle").textContent;
   const hasFlips = !!(s && (cfgOf(sel).flips || []).length);
   $("#uprightBtn").hidden = !hasFlips;
   if (!hasFlips && mode === "upright") mode = "paint";
@@ -279,21 +368,44 @@ function renderStage() {
     });
   }
   if (!s) return;
-  const url = `/api/preview?key=${encodeURIComponent(sel)}&mode=${mode}&color=${encodeURIComponent(previewNone ? "none" : paintOf(sel))}&b=${artBust}`;
-  const img = $("#previewImg");
+  const off = !(S.official || {}).off ? ((S.official || {}).slots || {})[sel] || "" : "";
+  const url = `/api/preview?key=${encodeURIComponent(sel)}&mode=${mode}&color=${encodeURIComponent(previewNone ? "none" : paintOf(sel))}&b=${artBust}&o=${encodeURIComponent(off)}`;
+  const img = $("#previewImg"), vp = $("#viewport"), msg = $("#stageMsg");
   if (img.dataset.src !== url) {
     img.dataset.src = url;
+    // another slot's picture must never stand in for this one: grey it out until ours arrives
+    const otherSlot = img.dataset.key !== sel;
+    clearTimeout(renderStage.slow);
+    msg.hidden = true; msg.classList.remove("err");
+    if (otherSlot && img.getAttribute("src")) vp.classList.add("stale");
+    renderStage.slow = setTimeout(() => {
+      if (img.dataset.src !== url) return;
+      msg.textContent = s.kind === "scs" ? "Drawing this template from the 3D model…" : "Loading the template…";
+      msg.hidden = false;
+    }, 400);
     const pre = new Image();
     renderStage.pre = pre;   // keep a reference, or Chromium may collect it before onload fires
     pre.fetchPriority = "high";
     pre.onload = () => {
       if (img.dataset.src !== url) return;
+      clearTimeout(renderStage.slow);
+      msg.hidden = true; vp.classList.remove("stale");
       const shapeChanged = pre.naturalWidth !== img.naturalWidth || pre.naturalHeight !== img.naturalHeight;
-      img.src = url;
+      img.src = url; img.dataset.key = sel;
       if (shapeChanged || view.fitted) img.decode().then(fit).catch(() => {});
     };
+    pre.onerror = async () => {
+      if (img.dataset.src !== url) return;
+      clearTimeout(renderStage.slow);
+      let why = "";
+      try { why = (await (await fetch(url)).json()).error || ""; } catch (e) { /* not JSON */ }
+      if (img.dataset.src !== url) return;
+      vp.classList.add("stale");
+      msg.textContent = `Couldn't draw this template${why ? ": " + why : ""} - Mod tab > Problems > Save error report`;
+      msg.classList.add("err"); msg.hidden = false;
+    };
     pre.src = url;
-    if (!img.getAttribute("src")) img.src = url;
+    if (!img.getAttribute("src")) { img.src = url; img.dataset.key = sel; }
   }
 }
 function applyView() { $("#previewImg").style.transform = `translate(${view.x}px,${view.y}px) scale(${view.z})`; }
@@ -310,9 +422,12 @@ function renderSlotTab() {
   if (!s) { el.innerHTML = `<p class="hint">Load a trailer pack to start.</p>`; return; }
   const cfg = cfgOf(sel), t = trailerOf(sel);
   const scs = s.kind === "scs";
-  const siblings = t.slots.filter((x) => x.key !== sel && (!scs || String(x.tex_size) === String(s.tex_size)));
-  const logo = s.kind === "logo";
+  const siblings = t.slots.filter((x) => x.key !== sel && (x.kind === "ai_sheet") === (s.kind === "ai_sheet") && (!scs || String(x.tex_size) === String(s.tex_size)));
+  const aisheet = s.kind === "ai_sheet";
+  const logo = s.kind === "logo", sign = s.trailer === "yard_signs", plogo = s.trailer === "player_logos", aiv = s.kind === "ai" || s.kind === "ai_trailer" || s.kind === "ai_escort" || s.kind === "ai_sheet";
   el.innerHTML = `
+    ${s.messy ? `<p class="warn" style="margin:0"><b>Overlapping layout.</b> SCS never made liveries for this AI model (it only gets a flat colour), so its texture layout puts several parts on top of each other: the same art lands on more than one part. A colour, a pattern or a logo in a clean area works; a detailed livery won't line up.</p>` : ""}
+    ${s.kind === "ai_escort" ? `<p class="hint" style="margin:0">Escort vehicle (special transport): SkinForge lays the body out again (like the escort templates skin authors make by hand): LEFT SIDE, RIGHT SIDE, ROOF / HOOD, FRONT and REAR each get their own space, so what you paint is exactly what shows - lettering reads right on both sides. The grey "inside" box is the bed / inner panels: a colour is enough. Each skin adds this escort, with your livery, to the escort vehicles that lead and follow oversize loads. Transparent areas take the paint colour.</p>` : s.kind === "ai_trailer" ? `<p class="hint" style="margin:0">AI trailer: the whole trailer on one sheet, drawn from SCS's traffic trailer model. Each skin adds one more of these trailers to traffic (AI trucks pull it) with your livery as its paint job. Transparent areas take the paint colour.</p>` : aiv && !aisheet ? `<p class="hint" style="margin:0">AI traffic: the whole body of this vehicle on one sheet, drawn from its 3D model. Each skin adds one more of these vehicles to the game's traffic with your livery. Transparent areas take the paint colour. Left and right usually share the side area (one reads mirrored). Lights, glass and chrome stay SCS's own; far away (lowest detail) the vehicle shows SCS's plain version.</p>` : ""}
     <div><h3>${esc(t.name)} - ${esc(s.label)}</h3><small class="hint" style="margin:0">${esc(s.trailer)} · ${esc(s.token)}${scs ? ` · ${texSizeOf(s)[0]} × ${texSizeOf(s)[1]}` : ""}</small></div>
     ${scs ? `<p class="hint" style="margin:0">${s.cab && t.kind === "scs_car" ? `Body sheet drawn from the car's 3D model - the whole car on one sheet. Becomes one paint job in the car's paint shop (Road Trip).` : s.cab ? `Cab sheet drawn from the 3D model (parts that use the cab texture are on it too). This skin becomes one paint job per cab you paint; the truck's separate parts go with every one of them. Paint only parts and it goes on every cab.` : `Template drawn from the 3D model. All parts of this ${t.kind === "scs_truck" || t.kind === "mod3d_truck" ? "truck" : "trailer"} go into <b>one paint job</b>; parts you leave empty take the paint colour.`}</p>` : ""}
     <div class="field"><span>${logo ? "Replaces the texture on" : "Applies to"}</span><div class="chips">${appliesTo(s, t).map((n) => `<span class="chip">${esc(n)}</span>`).join("") || '<span class="chip">no cab</span>'}</div></div>
@@ -326,11 +441,15 @@ function renderSlotTab() {
       ${cfg.art ? `<div class="artcard"><img src="${thumbUrl(sel, -1, 128)}" alt=""><div class="m"><b>${esc(base(cfg.art))}</b><small id="artInfo">…</small></div>
         <div class="row gap"><button class="small" data-pick="-1">Replace</button><button class="small danger" data-clear="-1">Remove</button></div></div>
         <div class="warnlist" id="artWarn"></div>`
-      : `<div class="dropzone" data-pick="-1"><b>Drop an image or click to choose</b><br>PNG with transparency · ${scs ? `${texSizeOf(s)[0]} × ${texSizeOf(s)[1]} (same shape as the template)` : logo ? "logo on a transparent square (2048 × 2048 ideal)" : s.has_template ? "same shape as the template (e.g. 4096 × 4096 or 4096 × 2048)" : "power-of-two size"}</div>`}
+      : `<div class="dropzone" data-pick="-1"><b>Drop an image or click to choose</b><br>PNG with transparency · ${scs ? `${texSizeOf(s)[0]} × ${texSizeOf(s)[1]} (same shape as the template)` : sign ? `the whole sign · ${s.tex_size ? s.tex_size[0] + " × " + s.tex_size[1] : "same size as the pack's"} (transparent = see-through on the sign)` : plogo ? `logo on a transparent square${s.tex_size ? " · the game's logo is " + s.tex_size[0] + " × " + s.tex_size[1] : ""}` : logo ? "logo on a transparent square (2048 × 2048 ideal)" : s.has_template ? "same shape as the template (e.g. 4096 × 4096 or 4096 × 2048)" : "power-of-two size"}</div>`}
     </div>
-    ${logo ? `<p class="hint" style="margin:0">Jon's trucks show this when you pick the matching <b>Your Logo</b> option in the truck shop. Load this mod <b>above</b> the Jon Ruda truck mods.</p>` : ""}
-    ${siblings.length ? `<div class="group"><h2>${logo ? "Use this logo for other slots too" : scs ? "Use this artwork for other parts too" : (s.kind === "truck" ? "Use this artwork for other cabs too" : "Use this artwork for other lengths too")}</h2>
-      <p class="hint" style="margin:0">${logo ? "One logo everywhere, or a different one per option - your call." : s.kind === "truck" ? "Only where two cabs share the same template layout - compare the Template view first." : "Handy when two body types share one layout (Jon does this for dry van + reefer of the same length). Check the preview of each."}</p>
+    ${aisheet ? (() => { const lens = ((s.label.match(/\(([^)]*)\)/) || [])[1] || "").split(",").map((x) => parseInt(x)).filter((x) => x);
+        const on = (S.project.ai_lengths || {})[t.id]; const has = (L) => !on || on.includes(L);
+        return lens.length ? `<div class="field"><span>Traffic lengths that use this sheet</span>${lens.map((L) => `<label class="check"><input type="checkbox" data-ailen="${L}" ${has(L) ? "checked" : ""}> ${L}'</label>`).join("")}</div>` : ""; })() : ""}
+    ${aisheet ? `<p class="hint" style="margin:0"><b>AI traffic livery.</b> Paint this sheet and SCS's AI trucks pull ${esc(t.name)}s with it - leave it empty for no AI traffic. SCS's traffic ${esc(t.name)}s all use one company sheet like this (it is how SCS's own company liveries - and SneaK's Voltison trailer - work): the <b>top half is the side</b>, shown on <b>both sides</b> - SkinForge re-maps SCS's traffic models so <b>every length shows the whole band</b>, edge to edge (shorter trailers squeeze it). Fill the band right down to its bottom edge. Bottom row: rear doors, front wall and the roof (small square). Every ticked traffic length uses this one sheet. Transparent = the paint colour.</p>` : ""}
+    ${sign ? `<p class="hint" style="margin:0">Replaces <b>${esc(s.template_dds || "")}</b> from the yard mod's pack. Load this mod <b>above</b> ${esc((s.targets[0] || [])[1] || "the sign pack")} in the mod manager. Template view: a PNG in your template folder whose name contains this sign's name (e.g. <i>msdsign</i> or <i>Manchester SD sign</i>), else the pack's own template, else what the pack shows now. After adding one, click ↻ on the Template folder line.</p>` : plogo ? `<p class="hint" style="margin:0">Pick it in the game when you create your company (or later in the company settings). It <b>replaces</b> the game's logo_${esc(s.token.slice(6))}: nothing is added, and only one company-logo mod can be active - load this mod <b>above</b> any other logo mod.${s.has_template ? " Template view shows the game's logo you replace." : " The game files couldn't be read, so the logo is built at your image's size (power of two, max 512)."}</p>` : logo ? `<p class="hint" style="margin:0">Jon's trucks show this when you pick the matching <b>Your Logo</b> option in the truck shop. Load this mod <b>above</b> the Jon Ruda truck mods.</p>` : ""}
+    ${siblings.length ? `<div class="group"><h2>${sign ? "Use this artwork for other signs too" : logo ? "Use this logo for other slots too" : scs ? "Use this artwork for other parts too" : (s.kind === "truck" ? "Use this artwork for other cabs too" : "Use this artwork for other lengths too")}</h2>
+      <p class="hint" style="margin:0">${sign ? "Same art on several signs, or a different one per sign." : logo ? "One logo everywhere, or a different one per option - your call." : s.kind === "truck" ? "Only where two cabs share the same template layout - compare the Template view first." : "Handy when two body types share one layout (Jon does this for dry van + reefer of the same length). Check the preview of each."}</p>
       <div class="share">${siblings.map((x) => `<label class="check"><input type="checkbox" value="${esc(x.key)}">${esc(x.label)}${cfgOf(x.key).art ? ' <span class="chip">has art</span>' : ""}</label>`).join("")}</div>
       <div><button class="small" id="shareBtn" ${cfg.art ? "" : "disabled"}>Copy artwork to checked</button></div></div>` : ""}
     ${s.overrides.length ? `<div class="group"><h2>Separate parts</h2>
@@ -339,12 +458,13 @@ function renderSlotTab() {
         <div class="artcard">${r ? `<img src="${thumbUrl(sel, o.index, 128)}" alt="">` : ""}<div class="m"><b>${esc(partName(o))}</b><small>${o.parts.length} part variant${o.parts.length > 1 ? "s" : ""}${r ? " · " + esc(base(r)) : inh ? " · shared: " + esc(base(inh)) : " · paint colour"}</small></div>
         <div class="row gap"><button class="small" data-pick="${o.index}">${r ? "Replace" : "Add"}</button>${r ? `<button class="small danger" data-clear="${o.index}">✕</button>` : ""}</div></div>`; }).join("")}</div>` : ""}
     ${logo ? "" : vresNote(t)}
-    ${logo ? "" : vehiclePaintGroup(t)}
+    ${logo || aiv ? "" : slotPaintGroup(t, s)}
     ${logo && !s.has_template ? "" : `<div class="group"><h2>Template</h2>
       ${logo ? "" : `<label class="field"><span>Template size</span><select data-k="template_size">
         ${[["", `Same as texture size (${(+S.project.resolution || 4096) / 1024}K)`], ["2048", "2K · 2048"], ["4096", "4K · 4096"], ["8192", "8K · 8192"]].map(([v, n]) => `<option value="${v}" ${String(S.project.template_size || "") === v ? "selected" : ""}>${n}</option>`).join("")}</select></label>`}
-      <div><button class="small" data-tmpl="${esc(t.id)}">Export painting templates for ${esc(t.id)}</button></div>
-      <p class="hint" style="margin:0">${scs ? `Saves every part's template (drawn from the game's models) as PNG into your project's templates folder - paint over it. ${tmplSizeNote(true, t.id)}` : `Saves the author's template for every ${s.kind === "truck" ? "cab" : "length"} as PNG into your project's templates folder - paint over it. ${tmplSizeNote(false, t.id)}`}</p>
+      ${scs ? officialNote(s) : ""}
+      <div class="row gap"><button class="small" data-tmplone="${esc(s.key)}">Export this template</button><button class="small ghost" data-tmpl="${esc(t.id)}">Choose templates…</button></div>
+      <p class="hint" style="margin:0">${scs ? `Saves every part's template (drawn from the game's models) as PNG into Documents\\SkinForge\\Templates (one folder per game and vehicle, shared by all projects) - paint over it. ${tmplSizeNote(true, t.id)}` : `Saves the author's template for every ${s.kind === "truck" ? "cab" : "length"} as PNG into Documents\\SkinForge\\Templates (one folder per game and vehicle, shared by all projects) - paint over it. ${tmplSizeNote(false, t.id)}`}</p>
       <label class="check"><input type="checkbox" data-k="export_guides" ${S.project.export_guides ? "checked" : ""}>Also export guide overlays (line art on transparent, for a locked top layer)</label></div>`}`;
   if (cfg.art) guard(async () => {
     const r = await api("/api/art/info", { key: sel });
@@ -372,9 +492,9 @@ function renderPaintTab() {
       <small>Jon ships every truck template twice. "Normal" matches his default and your MS2 truck skins; add Alt UV only if a cab shows the skin misplaced.</small></div>` : ""}
     <div class="field"><span>Finish · pick one or more</span><div class="seg" id="finishSeg">
       ${[["gloss", "Gloss"], ["metallic", "Metallic"], ["matte", "Matte"]].map(([v, l]) => `<button data-fin="${v}" class="${fins.includes(v) ? "on" : ""}">${l}</button>`).join("")}</div>
-      <small>Each finish is its own entry in the paint shop (Gloss + Metallic is how Jon ships his skins). Default for every truck / trailer - one can have its own (Slot tab).${fins.includes("matte") ? " Matte: flat, no shine - it swaps the model's base texture for a flat one, the way MS2's matte skins do." : ""}</small></div>
+      <small>Each finish is its own entry in the paint shop (Gloss + Metallic is how Jon ships his skins). <b>This skin only</b> - every skin keeps its own finish. Default for every truck / trailer in this skin - one can have its own (Slot tab).${fins.includes("matte") ? " Matte: flat, no shine - it swaps the model's base texture for a flat one, the way MS2's matte skins do." : ""}</small></div>
     <div class="field"><span>Default paint colour</span><div class="colorrow"><input type="color" data-k="base_color" value="${esc(p.base_color)}">
-      <label class="check"><input type="checkbox" data-k="color_locked" ${p.color_locked ? "checked" : ""}>Lock colour (players can't change it)</label><small class="hint" style="margin:0">Default for every truck / trailer - one can have its own lock and finish (Slot tab).</small></div>
+      <label class="check"><input type="checkbox" data-k="color_locked" ${p.color_locked ? "checked" : ""}>Lock colour (players can't change it)</label><small class="hint" style="margin:0">This skin only. Default for every truck / trailer - one can have its own lock and finish (Slot tab).</small></div>
       <small>Shows through every transparent pixel of your artwork. Templates with their own colour (<b>Custom</b> above the preview) keep theirs.</small></div>
     <div class="group" ${met ? "" : "hidden"}><h2>Metallic</h2>
       <div class="grid2">
@@ -398,6 +518,9 @@ function renderModTab() {
     </div>
     <label class="field"><span>Unit code</span><input type="text" maxlength="6" data-k="code" value="${esc(p.code)}" ${locked ? "disabled" : ""}>
       <small>${locked ? "Locked: saved games reference these paint jobs. Every slot keeps its ID on every rebuild." : "1-6 letters/digits, unique to this mod. Paint jobs become " + esc(p.code) + "01, " + esc(p.code) + "02 …"}</small></label>
+    <label class="field"><span>AI traffic · how often your vehicles show up</span><select data-k="ai_spawn" data-num>
+      ${[[0.3, "Less than SCS's own (0.3x)"], [1, "As often as SCS's own (1x)"], [3, "Often (3x)"], [10, "A lot (10x - for testing)"]].map(([v, n]) => `<option value="${v}" ${(+p.ai_spawn || 1) === v ? "selected" : ""}>${n}</option>`).join("")}</select>
+      <small>AI trucks and AI trailers with your skin, compared with the SCS truck / trailer they are copied from. There are dozens of SCS trucks and trailers in traffic, so at 1x you meet yours now and then - pick "A lot" to check a build quickly, then set it back before you share the mod.</small></label>
     <label class="field"><span>Description</span><textarea data-k="description" placeholder="Shown in the Mod Manager">${esc(p.description)}</textarea></label>
     <div class="field"><span>Output folder</span><div class="row gap"><input type="text" data-k="output_dir" value="${esc(p.output_dir)}" style="flex:1"><button class="small" id="browseOut">…</button></div>
       ${Object.entries(S.mod_dirs).map(([g, d]) => `<button class="link" data-out="${esc(d)}">Use ${g} mod folder</button>`).join(" ")}</div>
@@ -419,10 +542,10 @@ function renderModTab() {
 function renderBuild() {
   const b = S.build, el = $("#buildBox");
   const withArt = Object.entries(S.project.slots).filter(([, c]) => c.art);
-  const nl = withArt.filter(([k]) => k.startsWith("ruda_logos/")).length;
+  const nl = withArt.filter(([k]) => k.startsWith("ruda_logos/") || k.startsWith("yard_signs/") || k.startsWith("player_logos/")).length;
   const liveSkins = S.project.skins.filter((x) => !x.deleted && S.project.skin_counts[x.id]);
   const ns = liveSkins.reduce((a, x) => a + S.project.skin_counts[x.id], 0), n = ns + nl;
-  const what = [ns ? (liveSkins.length > 1 ? `${liveSkins.length} skins` : `${ns} slot${ns === 1 ? "" : "s"}`) : "", nl ? `${nl} logo${nl === 1 ? "" : "s"}` : ""].filter(Boolean).join(" + ") || "nothing yet";
+  const what = [ns ? (liveSkins.length > 1 ? `${liveSkins.length} skins` : `${ns} slot${ns === 1 ? "" : "s"}`) : "", nl ? `${nl} logo${nl === 1 ? "" : "s"}/sign${nl === 1 ? "" : "s"}` : ""].filter(Boolean).join(" + ") || "nothing yet";
   const out = (S.project.output_dir || "") + "\\" + (S.project.mod_name || "") + ".scs";
   let html = `<button class="primary" id="buildBtn" ${b.running || !n ? "disabled" : ""}>${b.running ? '<span class="spin"></span>Building…' : `Build mod · ${what}`}</button>
     <div class="build-out">→ ${esc(out)}</div>
@@ -515,13 +638,13 @@ document.addEventListener("click", async (e) => {
   if (t.dataset.act === "new") {
     $("#projMenu").hidden = true;
     const name = prompt("New project - name of the new skin (paint job name).\n\nStarts empty: no artwork, new mod name and unit code. Your current project stays saved and is under Recent.", "");
-    if (name) await guard(async () => { S = await api("/api/project/new", { name }); sel = null; artBust++; await refresh(); fit(); });
+    if (name) await guard(async () => { S = await api("/api/project/new", { name }); sel = null; opened = null; artBust++; await refresh(); fit(); });
     return;
   }
   if (t.dataset.act === "open") {
     $("#projMenu").hidden = true;
     const p = await dialog("open", "project", "Open SkinForge project (project.json)", S.project_dir);
-    if (p) await guard(async () => { await api("/api/project/open", { path: p }); sel = null; artBust++; await refresh(); fit(); });
+    if (p) await guard(async () => { await api("/api/project/open", { path: p }); sel = null; opened = null; artBust++; await refresh(); fit(); });
     return;
   }
   if (t.dataset.act === "rename") {
@@ -531,7 +654,7 @@ document.addEventListener("click", async (e) => {
     return;
   }
   if (t.dataset.act === "folder") { $("#projMenu").hidden = true; api("/api/open", { path: S.project_dir }); return; }
-  if (t.matches(".recent")) { $("#projMenu").hidden = true; await guard(async () => { await api("/api/project/open", { path: t.dataset.path }); sel = null; artBust++; await refresh(); fit(); }); return; }
+  if (t.matches(".recent")) { $("#projMenu").hidden = true; await guard(async () => { await api("/api/project/open", { path: t.dataset.path }); sel = null; opened = null; artBust++; await refresh(); fit(); }); return; }
   if (t.id === "findSrc") {
     await guard(async () => {
       const r = await api("/api/find_sources");
@@ -577,25 +700,43 @@ document.addEventListener("click", async (e) => {
     return;
   }
   if (t.dataset.loadtruck) {
-    const isTrailer = t.dataset.vk === "trailer", isCar = t.dataset.vk === "car", id = t.dataset.loadtruck;
-    toast(`Reading the ${isTrailer ? "trailer" : isCar ? "car" : "truck"}'s models… (the first time can take a minute)`);
+    const isTrailer = t.dataset.vk === "trailer", isCar = t.dataset.vk === "car", isAi = t.dataset.vk === "ai", id = t.dataset.loadtruck;
+    toast(`Reading the ${isTrailer ? "trailer" : isCar ? "car" : isAi ? "AI vehicle" : "truck"}'s models… (the first time can take a minute)`);
     t.disabled = true; t.textContent = "Loading…";
     await guard(async () => {
-      S = await api(isTrailer ? "/api/scs/trailer" : isCar ? "/api/scs/car" : "/api/scs/truck", { id });
+      S = await api(isTrailer ? "/api/scs/trailer" : isCar ? "/api/scs/car" : isAi ? "/api/scs/ai" : "/api/scs/truck", { id });
       setOpen(id, true); render();
+      if (isAi) {
+        const tr = S.trailers.find((x) => x.id === id && (x.kind.startsWith("scs_ai") || x.kind === "scs_escort"));
+        toast(tr && tr.slots.length ? `${tr.name}: body sheet ready` : (tr && tr.error) || "No usable template for this AI model (SCS never laid it out for liveries, parts overlap) - left out of the list", !(tr && tr.slots.length));
+        return;
+      }
       if (isCar) {
         const tr = S.trailers.find((x) => x.id === id && x.kind === "scs_car");
-        toast(tr && tr.slots.length ? `${tr.name}: body sheet ready` : (tr && tr.error) || "Nothing paintable on this car", !(tr && tr.slots.length));
+        toast(tr && tr.slots.length ? `${tr.name}: body sheet ready` : (tr && tr.error) || "Nothing paintable on this car - left out of the list", !(tr && tr.slots.length));
         return;
       }
       if (isTrailer) {
         const tr = S.trailers.find((x) => x.id === id && x.kind === "scs");
-        toast(tr && tr.slots.length ? `${tr.name}: ${tr.slots.length} parts` : (tr && tr.error) || "Nothing paintable on this trailer", !(tr && tr.slots.length));
+        toast(tr && tr.slots.length ? `${tr.name}: ${tr.slots.length} parts` : (tr && tr.error) || "Nothing paintable on this trailer - left out of the list", !(tr && tr.slots.length));
         return;
       }
       const tr = S.trailers.find((x) => x.id === id && (x.kind === "scs_truck" || x.kind === "mod3d_truck"));
-      toast(tr && tr.slots.length ? `${tr.name}: ${tr.slots.filter((x) => x.cab).length} cabs, ${tr.slots.filter((x) => !x.cab).length} parts` : (tr && tr.error) || "No paintable cab found for this truck", !(tr && tr.slots.length));
+      toast(tr && tr.slots.length ? `${tr.name}: ${tr.slots.filter((x) => x.cab).length} cabs, ${tr.slots.filter((x) => !x.cab).length} parts` : (tr && tr.error) || "No paintable cab found for this truck - left out of the list", !(tr && tr.slots.length));
     });
+    return;
+  }
+  if (t.id === "browseOfficial") {
+    const p = await dialog("dir", null, "Pick your folder of paint templates (PNG, one folder per truck / trailer, e.g. 'ATS templates')", (S.official || {}).dir || "");
+    if (p) await guard(async () => { S = await api("/api/official", { path: p }); render(); toast("Matching the template folder's sheets to the loaded trucks and trailers…"); refresh(); });
+    return;
+  }
+  if (t.id === "reloadOfficial") {
+    await guard(async () => { S = await api("/api/official", { reload: true }); artBust++; render(); toast("Reading the template folder again…"); refresh(); });
+    return;
+  }
+  if (t.id === "rmOfficial") {
+    await guard(async () => { S = await api("/api/official", { path: "" }); render(); });
     return;
   }
   if (t.id === "browseGame") {
@@ -613,10 +754,28 @@ document.addEventListener("click", async (e) => {
     await guard(async () => { S = await api("/api/sources", { sources: src }); render(); });
     return;
   }
-  if (t.dataset.tmpl) {
-    const keys = S.trailers.find((x) => x.id === t.dataset.tmpl).slots.map((s) => s.key);
+  if (t.dataset.bodies) {
+    const tr = S.trailers.find((x) => x.id === t.dataset.bodies);
+    await setSetting({ bodies_only: { [tr.id]: !bodiesOnly(tr) } });
+    if (bodiesOnly(tr) && !shownSlots(tr).some((x) => x.key === sel) && trailerOf(sel) && trailerOf(sel).id === tr.id) sel = shownSlots(tr)[0].key;
+    render();
+    return;
+  }
+  if (t.dataset.tmpl) {   // pick which templates of this vehicle to export
+    const tr = S.trailers.find((x) => x.id === t.dataset.tmpl), list = shownSlots(tr).filter((x) => x.has_template !== false);
+    $("#tmplPickTitle").textContent = `Export templates · ${tr.name}`;
+    $("#tmplPickList").innerHTML = list.map((x) => `<label class="check"><input type="checkbox" value="${esc(x.key)}" ${x.key === sel || list.length <= 3 ? "checked" : ""}> ${esc(x.label)}</label>`).join("");
+    $("#tmplPick").hidden = false;
+    return;
+  }
+  if (t.id === "tmplPickAll" || t.id === "tmplPickNone") { $$("#tmplPickList input").forEach((x) => { x.checked = t.id === "tmplPickAll"; }); return; }
+  if (t.id === "tmplPickCancel") { $("#tmplPick").hidden = true; return; }
+  if (t.id === "tmplPickGo" || t.dataset.tmplone) {
+    const keys = t.dataset.tmplone ? [t.dataset.tmplone] : $$("#tmplPickList input").filter((x) => x.checked).map((x) => x.value);
+    if (!keys.length) { toast("Tick at least one template"); return; }
+    $("#tmplPick").hidden = true;
     toast("Exporting templates…");
-    await guard(async () => { const r = await api("/api/templates", { keys }); toast(`${r.written.length} templates written to ${r.dir}`); });
+    await guard(async () => { const r = await api("/api/templates", { keys }); toast(`${r.written.length} template${r.written.length === 1 ? "" : "s"} written to ${r.dir}`); });
     return;
   }
   if (t.id === "importLogos") {
@@ -640,6 +799,15 @@ document.addEventListener("click", async (e) => {
     const same = order === finishesOf(S.project).join("+");
     await setSetting({ finish_by_vehicle: { [tid]: same ? "" : order } }); renderSlotTab(); renderTrailers(); renderBuild(); return;
   }
+  if (t.dataset.sfin) {
+    const s = slotOf(sel), tr = trailerOf(sel), cur = new Set(sfinOf(s, tr)), f = t.dataset.sfin;
+    if (cur.has(f)) { if (cur.size === 1) { toast("Keep at least one finish"); return; } cur.delete(f); } else cur.add(f);
+    const order = ["gloss", "metallic", "matte"].filter((x) => cur.has(x)).join("+");
+    const same = order === vfinOf(tr.id).join("+");
+    await setSetting({ finish_by_slot: { [sel]: same ? "" : order } }); renderSlotTab(); renderTrailers(); renderBuild(); return;
+  }
+  if (t.dataset.sfinreset) { await setSetting({ finish_by_slot: { [t.dataset.sfinreset]: "" } }); renderSlotTab(); renderTrailers(); renderBuild(); return; }
+  if (t.dataset.strafficreset) { await setSetting({ traffic_by_slot: { [t.dataset.strafficreset]: "" } }); renderSlotTab(); renderTrailers(); renderBuild(); return; }
   if (t.dataset.vfinreset) { await setSetting({ finish_by_vehicle: { [t.dataset.vfinreset]: "" } }); renderSlotTab(); renderTrailers(); renderBuild(); return; }
   if (t.dataset.fin) {
     const cur = new Set(finishesOf(S.project)), f = t.dataset.fin;
@@ -656,7 +824,7 @@ document.addEventListener("click", async (e) => {
     await guard(async () => {
       const r = await api("/api/flips", { key: sel, action: "extract" });
       S.project = r.project; artBust++;
-      toast("Upright sheet made - also saved as " + r.file.split(/[\\/]/).pop() + " in the templates folder");
+      toast("Upright sheet made - also saved as " + r.file.split(/[\\/]/).pop() + " in the project's art folder");
       renderStage(); renderSlotTab(); renderTrailers();
     });
     return;
@@ -709,6 +877,10 @@ $("#fileInput").addEventListener("change", (e) => {
 
 document.addEventListener("change", (e) => {
   const t = e.target;
+  if (t.id === "officialOff") {
+    guard(async () => { S = await api("/api/official", { off: t.checked }); render(); });
+    return;
+  }
   if (t.dataset.k) {
     let v = t.type === "checkbox" ? t.checked : t.value;
     if (t.dataset.num !== undefined) v = +v;
@@ -724,6 +896,26 @@ document.addEventListener("change", (e) => {
       }
       renderBuild();
     });
+  } else if (t.dataset.traffic) {
+    const tid = t.dataset.vt, cur = trafficOf(tid);
+    let own = cur !== "ai", ai = cur !== "own";
+    if (t.dataset.traffic === "own") own = t.checked; else ai = t.checked;
+    if (!own && !ai) { own = true; toast("Pick at least one - the skin has to go somewhere", true); }
+    setSetting({ traffic_by_vehicle: { [tid]: own && ai ? "both" : ai ? "ai" : "own" } }).then(() => { renderSlotTab(); renderTrailers(); renderBuild(); });
+  } else if (t.dataset.ailen) {
+    const tr = trailerOf(sel), all = $$("[data-ailen]").map((x) => +x.dataset.ailen);
+    const on = $$("[data-ailen]").filter((x) => x.checked).map((x) => +x.dataset.ailen);
+    setSetting({ ai_lengths: { [tr.id]: on.length === all.length ? null : on } }).then(() => { renderSlotTab(); renderTrailers(); renderBuild(); });
+  } else if (t.dataset.straffic) {
+    const s = slotOf(sel), tr = trailerOf(sel), cur = strafficOf(s, tr);
+    let own = cur !== "ai", ai = cur !== "own";
+    if (t.dataset.straffic === "own") own = t.checked; else ai = t.checked;
+    if (!own && !ai) { own = true; toast("Pick at least one - the skin has to go somewhere", true); }
+    const v = own && ai ? "both" : ai ? "ai" : "own";
+    setSetting({ traffic_by_slot: { [sel]: v === trafficOf(tr.id) ? "" : v } }).then(() => { renderSlotTab(); renderTrailers(); renderBuild(); });
+  } else if (t.dataset.slock) {
+    const v = t.value === "" ? null : t.value === "1";
+    setSetting({ lock_by_slot: { [t.dataset.slock]: v } }).then(() => { renderSlotTab(); renderTrailers(); });
   } else if (t.dataset.vlock) {
     const v = t.value === "" ? null : t.value === "1";
     setSetting({ lock_by_vehicle: { [t.dataset.vlock]: v } }).then(() => { renderSlotTab(); renderTrailers(); });
@@ -841,3 +1033,78 @@ setInterval(() => fetch("/api/ping").catch(() => {}), 2000);
 window.addEventListener("pagehide", () => navigator.sendBeacon("/api/bye"));
 
 refresh().then(fit).catch((e) => toast(e.message, true));
+
+// ---------------------------------------------------------------- colour popover
+// The app window's native colour box (Windows) has no hex field and no eyedropper: every
+// <input type="color"> opens this instead - hex box (paste #1a2b3c / 1a2b3c), screen eyedropper,
+// recent colours, and the system picker as a fallback. Applying fires the input's normal "change".
+const colorPop = { input: null, native: false };
+function recentColors() { try { return JSON.parse(localStorage.getItem("sf_recent_colors") || "[]"); } catch (e) { return []; } }
+function rememberColor(c) {
+  try { localStorage.setItem("sf_recent_colors", JSON.stringify([c, ...recentColors().filter((x) => x !== c)].slice(0, 10))); } catch (e) { /* storage off */ }
+}
+function normHex(v) {
+  const m = String(v || "").trim().replace(/^#/, "").match(/^([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!m) return null;
+  const h = m[1].length === 3 ? m[1].split("").map((c) => c + c).join("") : m[1];
+  return "#" + h.toLowerCase();
+}
+function openColorPop(input) {
+  colorPop.input = input;
+  let el = $("#colorPop");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "colorPop"; el.className = "color-pop";
+    document.body.appendChild(el);
+  }
+  const cur = input.value || "#9a9a9a";
+  el.innerHTML = `<div class="row gap"><span class="cp-sw" id="cpSw" style="background:${cur}"></span>
+      <input id="cpHex" type="text" spellcheck="false" value="${cur}" maxlength="7" placeholder="#rrggbb"></div>
+    <div class="row gap">${"EyeDropper" in window ? `<button class="small" id="cpDrop" title="Pick a colour from anywhere on the screen">Eyedropper</button>` : ""}
+      <button class="small ghost" id="cpSys">System picker…</button></div>
+    ${recentColors().length ? `<div class="cp-recent">${recentColors().map((c) => `<button class="cp-r" data-cp="${c}" title="${c}" style="background:${c}"></button>`).join("")}</div>` : ""}
+    <div class="row gap" style="justify-content:flex-end"><button class="small ghost" id="cpCancel">Cancel</button><button class="small" id="cpOk">Use colour</button></div>`;
+  const r = input.getBoundingClientRect();
+  el.hidden = false;
+  el.style.left = Math.max(8, Math.min(window.innerWidth - 260, r.left)) + "px";
+  el.style.top = (r.bottom + 6 + 210 > window.innerHeight ? Math.max(8, r.top - 216) : r.bottom + 6) + "px";
+  const hex = $("#cpHex");
+  hex.focus(); hex.select();
+  hex.addEventListener("input", () => { const h = normHex(hex.value); hex.classList.toggle("bad", !h); if (h) $("#cpSw").style.background = h; });
+  hex.addEventListener("keydown", (e) => { if (e.key === "Enter") applyColorPop(); if (e.key === "Escape") closeColorPop(); });
+}
+function closeColorPop() { const el = $("#colorPop"); if (el) el.hidden = true; colorPop.input = null; }
+function applyColorPop(val) {
+  const inp = colorPop.input, h = normHex(val || $("#cpHex").value);
+  if (!inp) return;
+  if (!h) { toast("Not a colour - use #rrggbb, e.g. #1a2b3c", true); return; }
+  closeColorPop();
+  rememberColor(h);
+  inp.value = h;
+  inp.dispatchEvent(new Event("input", { bubbles: true }));
+  inp.dispatchEvent(new Event("change", { bubbles: true }));
+}
+document.addEventListener("click", async (e) => {
+  const inp = e.target.closest && e.target.closest('input[type="color"]');
+  if (inp) {
+    if (colorPop.native) { colorPop.native = false; return; }   // "System picker…": let it open
+    e.preventDefault(); e.stopPropagation();
+    openColorPop(inp);
+    return;
+  }
+  const pop = $("#colorPop");
+  if (!pop || pop.hidden) return;
+  if (!e.target.closest("#colorPop")) { closeColorPop(); return; }
+  const id = e.target.id;
+  if (id === "cpCancel") closeColorPop();
+  else if (id === "cpOk") applyColorPop();
+  else if (e.target.dataset.cp) applyColorPop(e.target.dataset.cp);
+  else if (id === "cpDrop") {
+    try { const r = await new window.EyeDropper().open(); $("#cpHex").value = r.sRGBHex; $("#cpSw").style.background = r.sRGBHex; }
+    catch (err) { /* cancelled with Esc */ }
+  } else if (id === "cpSys") {
+    const inp2 = colorPop.input; closeColorPop();
+    colorPop.native = true;
+    try { inp2.showPicker(); colorPop.native = false; } catch (err) { inp2.click(); }
+  }
+}, true);

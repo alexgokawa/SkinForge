@@ -24,7 +24,6 @@
   </div>
   <button class="small" data-act="new" title="Start a new, empty project - your current one stays saved">
     <svg viewBox="0 0 16 16" width="13"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>New project</button>
-  <button class="small ghost" data-act="open" title="Open a saved project">Open…</button>
   <div class="seg" id="gameSeg" title="Which game this project makes skins for: its own packs, game files and mod folder">
     <button data-game="ats">ATS</button><button data-game="ets2">ETS2</button></div>
   <div class="spacer"></div>
@@ -42,7 +41,8 @@
     <section class="card">
       <div class="card-h"><h2>Sources</h2><button class="link" id="findSrc">Find in mod folder</button></div>
       <div id="sources"></div>
-      <div class="row gap"><button class="small" id="browseSrc">Choose .scs…</button><button class="small" id="browseGame" title="Your ATS / ETS2 install folder (Steam ...\common\American Truck Simulator). Found automatically when Steam is in the usual place. An extracted def + base_vehicle folder works too.">SCS game files…</button></div>
+      <div class="row gap"><button class="small" id="browseSrc">Choose .scs…</button><button class="small" id="browseGame" title="Your ATS / ETS2 install folder (Steam ...\common\American Truck Simulator). Found automatically when Steam is in the usual place. An extracted def + base_vehicle folder works too.">SCS game files…</button><button class="small" id="browseOfficial" title="A folder of paint template PNGs for SCS's trucks and trailers (the community sets on Trucky - truckymods.io, 'truck and trailer templates' - one folder per truck / trailer). Template view and Export then use those sheets wherever they match the game's model; anything else keeps SkinForge's own template.">Template folder…</button></div>
+      <div id="officialSrc"></div>
       <p class="hint">Mod trailers/trucks: the author's <b>Open Definition</b> .scs. SCS's own trucks and trailers: read straight from your game install, no extracting.</p>
     </section>
     <div id="trailers"></div>
@@ -67,7 +67,7 @@
         <button data-vsize="8192">8K</button>
       </div>
       <div class="spacer"></div>
-      <span class="stage-title" id="stageTitle"></span>
+      <span class="stage-title" id="stageTitle" hidden></span>
       <button class="small ghost" id="zoomFit" title="Fit (F)">Fit</button>
       <button class="small ghost" id="zoom100" title="Zoom 1:1">1:1</button>
     </div>
@@ -80,6 +80,7 @@
           <span>PNG with transparency, same shape as the template</span>
         </div>
       </div>
+      <div class="stage-msg" id="stageMsg" hidden></div>
       <div class="pick-hint" id="pickHint" hidden>Click a mirrored piece · if it grabs too much, <b>drag a box</b> around the piece · <b>Esc</b> when done</div>
       <div class="empty" id="emptyStage" hidden>
         <b>Nothing loaded yet</b>
@@ -105,5 +106,13 @@
 <div class="toast" id="toast" hidden></div>
 <input type="file" id="fileInput" accept="image/*,.dds,.tga,.psd" hidden>
 <script src="/static/app.js"></script>
+<div class="tpick-overlay" id="tmplPick" hidden>
+  <div class="tpick-box">
+    <h3 id="tmplPickTitle">Export templates</h3>
+    <div class="row gap"><button class="small ghost" id="tmplPickAll">All</button><button class="small ghost" id="tmplPickNone">None</button></div>
+    <div class="tpick-list" id="tmplPickList"></div>
+    <div class="row gap" style="justify-content:flex-end"><button class="small ghost" id="tmplPickCancel">Cancel</button><button class="small" id="tmplPickGo">Export checked</button></div>
+  </div>
+</div>
 </body>
 </html>

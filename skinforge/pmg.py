@@ -125,3 +125,71 @@ def mat_effect(data: bytes | None) -> str:
 def is_paintable(effect: str) -> bool:
     """Pieces that take the paint job texture (sampled with the second UV set)."""
     return "truckpaint" in effect
+
+
+# ---------------------------------------------------------------- PMD look writer
+_TOKEN_IDX = {c: i + 1 for i, c in enumerate(_TOKEN_CHARS)}
+
+
+def token_val(s: str) -> int:
+    """text (<= 12 chars of a-z 0-9 _) -> SCS token."""
+    s = s.lower()
+    if not s or len(s) > 12 or any(c not in _TOKEN_IDX for c in s):
+        raise ValueError(f"bad token {s!r}")
+    v = 0
+    for c in reversed(s):
+        v = v * 38 + _TOKEN_IDX[c]
+    return v
+
+
+def read_pmd(data: bytes) -> dict:
+    """Full .pmd 0x04 contents: looks, variants, part attribute links, attributes, attribute
+    values and the material paths of every look."""
+    (ver, mc, lc, pc, vc, partc, ac, avs, _mbs, lo, vo, pao, avo, ao, mo, mdo) = struct.unpack_from("<16I", data, 0)
+    if ver != 4:
+        raise ModelError(f"unsupported .pmd version {ver}")
+    looks = [struct.unpack_from("<Q", data, lo + 8 * i)[0] for i in range(lc)]
+    variants = [struct.unpack_from("<Q", data, vo + 8 * i)[0] for i in range(vc)]
+    mats = []
+    for i in range(lc * mc):
+        o = struct.unpack_from("<I", data, mo + 4 * i)[0]
+        mats.append(data[o:data.index(b"\0", o)].decode("utf-8"))
+    return {"mc": mc, "pc": pc, "looks": looks, "variants": variants,
+            "part_attribs": data[pao:pao + 8 * partc], "partc": partc,
+            "attribs": data[ao:ao + 16 * ac], "ac": ac, "avs": avs,
+            "attrib_values": data[avo:avo + avs * vc],
+            "mats": [mats[l * mc:(l + 1) * mc] for l in range(lc)]}
+
+
+def write_pmd(m: dict) -> bytes:
+    """Inverse of read_pmd (same block order SCS uses)."""
+    mc, lc, vc = m["mc"], len(m["looks"]), len(m["variants"])
+    lo = 64
+    vo = lo + 8 * lc
+    pao = vo + 8 * vc
+    ao = pao + len(m["part_attribs"])
+    avo = ao + len(m["attribs"])
+    mo = avo + len(m["attrib_values"])
+    mdo = mo + 4 * lc * mc
+    strings, offs = b"", []
+    for look in m["mats"]:
+        for p in look:
+            offs.append(mdo + len(strings))
+            strings += p.encode("utf-8") + b"\0"
+    head = struct.pack("<16I", 4, mc, lc, m["pc"], vc, m["partc"], m["ac"], m["avs"], len(strings),
+                       lo, vo, pao, avo, ao, mo, mdo)
+    return (head + b"".join(struct.pack("<Q", t) for t in m["looks"])
+            + b"".join(struct.pack("<Q", t) for t in m["variants"])
+            + m["part_attribs"] + m["attribs"] + m["attrib_values"]
+            + b"".join(struct.pack("<I", o) for o in offs) + strings)
+
+
+def add_looks(data: bytes, new_looks) -> bytes:
+    """Copy of a .pmd with extra looks: new_looks = [(name, [material path per material])]."""
+    m = read_pmd(data)
+    for name, mats in new_looks:
+        if len(mats) != m["mc"]:
+            raise ModelError("look needs one material per model material")
+        m["looks"].append(token_val(name))
+        m["mats"].append(list(mats))
+    return write_pmd(m)

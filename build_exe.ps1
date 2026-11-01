@@ -24,8 +24,20 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
 }
 $vpy = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 & $vpy -m pip install --upgrade pip --quiet
-& $vpy -m pip install --upgrade "pillow>=11.2" pyinstaller --quiet
-if ($LASTEXITCODE -ne 0) { Write-Host "pip install failed." -ForegroundColor Red; exit 1 }
+& $vpy -m pip install --upgrade "pillow>=11.2" "numpy>=1.26" pyinstaller
+if ($LASTEXITCODE -ne 0) { Write-Host "pip install failed (see the lines above)." -ForegroundColor Red; exit 1 }
+# make sure the build environment really has what SkinForge imports (an old .venv from an
+# earlier SkinForge folder may not have numpy)
+& $vpy -c "import numpy, PIL; print('numpy', numpy.__version__, '/ Pillow', PIL.__version__)"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "numpy / Pillow missing in the build environment - rebuilding it..." -ForegroundColor Yellow
+    Remove-Item ".venv" -Recurse -Force
+    & $exe @pre -m venv .venv
+    & $vpy -m pip install --upgrade pip --quiet
+    & $vpy -m pip install "pillow>=11.2" "numpy>=1.26" pyinstaller
+    & $vpy -c "import numpy, PIL"
+    if ($LASTEXITCODE -ne 0) { Write-Host "Could not install numpy. Send me the lines above." -ForegroundColor Red; exit 1 }
+}
 
 # 3. build
 Write-Host "Building SkinForge.exe..." -ForegroundColor Cyan
@@ -34,6 +46,7 @@ Write-Host "Building SkinForge.exe..." -ForegroundColor Cyan
     --icon "skinforge\web\skinforge.ico" `
     --add-data "skinforge\web;skinforge\web" `
     --hidden-import tkinter --hidden-import tkinter.filedialog `
+    --hidden-import numpy --collect-submodules skinforge `
     SkinForge.py
 if ($LASTEXITCODE -ne 0) { Write-Host "PyInstaller failed." -ForegroundColor Red; exit 1 }
 
