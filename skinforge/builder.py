@@ -493,7 +493,11 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
         # type whenever it has artwork - no tick needed; the sheet's length boxes pick the lengths
         sheet_rel = cfg_of(f"{tid}/ai_sheet").get("art")
         if sheet_rel:
-            ai_trailer_jobs.append((tid, o["ai_lengths"].get(tid), sheet_rel, sid, sname, color))
+            # the sheet's own colour (set while the sheet is selected), else the trailer's, else the
+            # first body's: AI trailers have no shop colour of their own
+            scolor = cfg_of(f"{tid}/ai_sheet").get("color") or color or \
+                next((cfg_of(b.key).get("color") for b in bodies if cfg_of(b.key).get("color")), None)
+            ai_trailer_jobs.append((tid, o["ai_lengths"].get(tid), sheet_rel, sid, sname, scolor))
         for body, ukey, blk, job_parts, suit in jobs:
             anchor = body if body is not None else all_parts[0]
             has_art = any(sl.key in part_dds for sl in job_parts)
