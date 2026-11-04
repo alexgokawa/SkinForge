@@ -1212,6 +1212,17 @@ def is_mod(game, d):
     return base is None or not base.listdir(d)
 
 
+def trailer_name(game, tid, mod=False):
+    """Display name: SCS's own from TRAILER_NAMES, mods from data.sii, DLC trailers from data.sii
+    when it has info[], else the id made readable (krone.coolliner -> Krone Coolliner)."""
+    if not mod and tid in TRAILER_NAMES:
+        return TRAILER_NAMES[tid]
+    name = vehicle_name(game, f"/def/vehicle/trailer_owned/{tid}", tid)
+    if name != tid:
+        return name
+    return " ".join(w.capitalize() for w in re.split(r"[._]+", tid) if w)
+
+
 def vehicle_name(game, d, tid):
     """Brand + name from data.sii info[] (mods), else the id."""
     data = game.read(f"{d}/data.sii")
@@ -1392,7 +1403,7 @@ def scan_trailer(game, tid, res, progress=None):
     its 3D models. Returns a Trailer (no slots when nothing on it is paintable)."""
     from .catalog import Slot, Trailer
     mod = is_mod(game, f"/def/vehicle/trailer_owned/{tid}")
-    tname = vehicle_name(game, f"/def/vehicle/trailer_owned/{tid}", tid) if mod else TRAILER_NAMES.get(tid, tid)
+    tname = trailer_name(game, tid, mod)
     if progress:
         progress(f"Reading {tname}…")
     try:
@@ -1482,11 +1493,11 @@ def scan(src, res: int = 4096, progress=None, skip=(), loaded=None):
             continue
         tid = entry[:-1]
         mod = is_mod(game, f"/def/vehicle/trailer_owned/{tid}")
-        if not tid.startswith("scs.") and not mod:
-            continue
+        # every trailer in the game files is listed: SCS's own (scs.*) and the DLC brand trailers
+        # (ETS2 Krone, Schwarzmüller, Kögel, Feldbinder, Wielton, Tirsan, Schmitz ... from dlc_*.scs)
         if not mod and loaded is not None and tid not in loaded:
             from .catalog import Trailer
-            t = Trailer(tid, TRAILER_NAMES.get(tid, tid), [])
+            t = Trailer(tid, trailer_name(game, tid, mod), [])
             t.vkind, t.lazy = "scs", True
             out.append(t)
             continue

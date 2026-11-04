@@ -87,11 +87,27 @@ function renderSources() {
   renderOfficial();
 }
 function officialNote(s) {
-  const o = S.official || {}, f = (o.slots || {})[s.key];
+  const o = S.official || {}, f = (o.slots || {})[s.key], pick = (o.picks || {})[s.key];
   if (!o.dir) return `<p class="hint" style="margin:0">Have a folder of paint template PNGs for SCS's trucks and trailers (the community sets on Trucky: truckymods.io, 'truck and trailer templates')? Point <b>Template folder…</b> (Sources) at that folder and the Template view and Export use that sheet wherever it matches this model.</p>`;
-  if (!f) return `<p class="hint" style="margin:0">${o.busy ? "Looking for this part's sheet in your template folder…" : "No sheet in your template folder matches this part - SkinForge's drawn template is used."}</p>`;
+  const choose = `<div class="row gap"><button class="small ghost" data-opick="${esc(s.key)}" title="Pick the sheet for this part from your template folder yourself">Choose sheet…</button>${pick !== undefined ? `<button class="small ghost" data-opickauto="${esc(s.key)}" title="Let SkinForge match the sheet again">Automatic</button>` : ""}</div>`;
+  if (pick === "") return `<p class="hint" style="margin:0">You chose SkinForge's own template for this part.</p>${choose}`;
+  if (pick) return `<p class="hint" style="margin:0">Your chosen sheet: <b>${esc(pick)}</b></p>${choose}`;
+  if (!f) return `<p class="hint" style="margin:0">${o.busy ? "Looking for this part's sheet in your template folder…" : "No sheet in your template folder matched this part automatically - SkinForge's drawn template is used. Pick one yourself with Choose sheet…"}</p>${choose}`;
   return `<p class="hint" style="margin:0">Template folder sheet: <b>${esc(f)}</b> (same layout as the game's model).</p>
-    <label class="check"><input type="checkbox" id="officialOff" ${o.off ? "checked" : ""}>Use SkinForge's labelled template instead (FRONT / ROOF / LEFT SIDE…)</label>`;
+    <label class="check"><input type="checkbox" id="officialOff" ${o.off ? "checked" : ""}>Use SkinForge's labelled template instead (FRONT / ROOF / LEFT SIDE…)</label>${choose}`;
+}
+// "Choose sheet…": every PNG of the vehicle's template-folder folders as thumbnails; one click picks it
+async function openSheetPick(key) {
+  const s = slotOf(key);
+  const r = await api(`/api/official/candidates?key=${encodeURIComponent(key)}`);
+  $("#oPickTitle").textContent = `Template sheet · ${s ? s.label : key}`;
+  $("#oPickNote").textContent = r.items.length ? `${r.items.length} sheet${r.items.length > 1 ? "s" : ""}` +
+    (r.auto ? ` · automatic match: ${r.auto}` : " · no automatic match") : "No PNGs found in your template folder";
+  $("#oPickGrid").innerHTML = r.items.map((x) => `<button class="opick-item${x.rel === r.pick || (r.pick == null && x.rel === r.auto) ? " on" : ""}" data-orel="${esc(x.rel)}" title="${esc(x.rel)} · ${x.w}×${x.h}">
+      <img loading="lazy" src="/api/official/thumb?rel=${encodeURIComponent(x.rel)}&h=140" alt="">
+      <span>${esc(x.rel)}</span><small>${x.w}×${x.h}</small></button>`).join("");
+  $("#oPick").dataset.key = key;
+  $("#oPick").hidden = false;
 }
 function renderOfficial() {
   const o = S.official || {}, el = $("#officialSrc");
@@ -519,7 +535,7 @@ function renderModTab() {
     <label class="field"><span>Unit code</span><input type="text" maxlength="6" data-k="code" value="${esc(p.code)}" ${locked ? "disabled" : ""}>
       <small>${locked ? "Locked: saved games reference these paint jobs. Every slot keeps its ID on every rebuild." : "1-6 letters/digits, unique to this mod. Paint jobs become " + esc(p.code) + "01, " + esc(p.code) + "02 …"}</small></label>
     <label class="field"><span>AI traffic · how often your vehicles show up</span><select data-k="ai_spawn" data-num>
-      ${[[0.3, "Less than SCS's own (0.3x)"], [1, "As often as SCS's own (1x)"], [3, "Often (3x)"], [10, "A lot (10x - for testing)"]].map(([v, n]) => `<option value="${v}" ${(+p.ai_spawn || 1) === v ? "selected" : ""}>${n}</option>`).join("")}</select>
+      ${[[0.3, "Less than SCS's own (0.3x)"], [1, "Like one of SCS's own (1x)"], [3, "Often (3x)"], [10, "A lot (10x - for testing)"]].map(([v, n]) => `<option value="${v}" ${(+p.ai_spawn || 1) === v ? "selected" : ""}>${n}</option>`).join("")}</select>
       <small>AI trucks and AI trailers with your skin, compared with the SCS truck / trailer they are copied from. There are dozens of SCS trucks and trailers in traffic, so at 1x you meet yours now and then - pick "A lot" to check a build quickly, then set it back before you share the mod.</small></label>
     <label class="field"><span>Description</span><textarea data-k="description" placeholder="Shown in the Mod Manager">${esc(p.description)}</textarea></label>
     <div class="field"><span>Output folder</span><div class="row gap"><input type="text" data-k="output_dir" value="${esc(p.output_dir)}" style="flex:1"><button class="small" id="browseOut">…</button></div>
@@ -770,6 +786,26 @@ document.addEventListener("click", async (e) => {
   }
   if (t.id === "tmplPickAll" || t.id === "tmplPickNone") { $$("#tmplPickList input").forEach((x) => { x.checked = t.id === "tmplPickAll"; }); return; }
   if (t.id === "tmplPickCancel") { $("#tmplPick").hidden = true; return; }
+  if (t.dataset && t.dataset.opick) { await guard(() => openSheetPick(t.dataset.opick)); return; }
+  if (t.dataset && t.dataset.opickauto) {
+    await guard(async () => { S = await api("/api/official/pick", { key: t.dataset.opickauto, rel: null }); artBust++; render(); });
+    return;
+  }
+  const oi = t.closest && t.closest(".opick-item");
+  if (oi || t.id === "oPickOwn") {
+    const key = $("#oPick").dataset.key;
+    $("#oPick").hidden = true;
+    await guard(async () => { S = await api("/api/official/pick", { key, rel: oi ? oi.dataset.orel : "" }); artBust++; render(); });
+    toast(oi ? `Using ${oi.dataset.orel}` : "Using SkinForge's own template");
+    return;
+  }
+  if (t.id === "oPickAuto") {
+    const key = $("#oPick").dataset.key;
+    $("#oPick").hidden = true;
+    await guard(async () => { S = await api("/api/official/pick", { key, rel: null }); artBust++; render(); });
+    return;
+  }
+  if (t.id === "oPickCancel" || t.id === "oPick") { $("#oPick").hidden = true; return; }
   if (t.id === "tmplPickGo" || t.dataset.tmplone) {
     const keys = t.dataset.tmplone ? [t.dataset.tmplone] : $$("#tmplPickList input").filter((x) => x.checked).map((x) => x.value);
     if (!keys.length) { toast("Tick at least one template"); return; }
@@ -1039,9 +1075,12 @@ refresh().then(fit).catch((e) => toast(e.message, true));
 // <input type="color"> opens this instead - hex box (paste #1a2b3c / 1a2b3c), screen eyedropper,
 // recent colours, and the system picker as a fallback. Applying fires the input's normal "change".
 const colorPop = { input: null, native: false };
-function recentColors() { try { return JSON.parse(localStorage.getItem("sf_recent_colors") || "[]"); } catch (e) { return []; } }
+// recent colours live in SkinForge's settings.json (S.recent_colors), not browser storage: the window
+// gets a new port on every start, which empties localStorage
+function recentColors() { return (S && S.recent_colors) || []; }
 function rememberColor(c) {
-  try { localStorage.setItem("sf_recent_colors", JSON.stringify([c, ...recentColors().filter((x) => x !== c)].slice(0, 10))); } catch (e) { /* storage off */ }
+  if (S) S.recent_colors = [c, ...recentColors().filter((x) => x !== c)].slice(0, 6);
+  api("/api/colors", { color: c }).then((r) => { if (S && r.recent_colors) S.recent_colors = r.recent_colors; }).catch(() => {});
 }
 function normHex(v) {
   const m = String(v || "").trim().replace(/^#/, "").match(/^([0-9a-f]{3}|[0-9a-f]{6})$/i);
@@ -1062,7 +1101,7 @@ function openColorPop(input) {
       <input id="cpHex" type="text" spellcheck="false" value="${cur}" maxlength="7" placeholder="#rrggbb"></div>
     <div class="row gap">${"EyeDropper" in window ? `<button class="small" id="cpDrop" title="Pick a colour from anywhere on the screen">Eyedropper</button>` : ""}
       <button class="small ghost" id="cpSys">System picker…</button></div>
-    ${recentColors().length ? `<div class="cp-recent">${recentColors().map((c) => `<button class="cp-r" data-cp="${c}" title="${c}" style="background:${c}"></button>`).join("")}</div>` : ""}
+    ${recentColors().length ? `<div class="cp-label">Recent</div><div class="cp-recent">${recentColors().map((c) => `<button class="cp-r" data-cp="${c}" title="${c}" style="background:${c}"></button>`).join("")}</div>` : ""}
     <div class="row gap" style="justify-content:flex-end"><button class="small ghost" id="cpCancel">Cancel</button><button class="small" id="cpOk">Use colour</button></div>`;
   const r = input.getBoundingClientRect();
   el.hidden = false;

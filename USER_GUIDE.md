@@ -146,8 +146,19 @@ places itself (front, back, along the route) wear it too. Two mods that do this 
 escort: the one higher in the mod manager wins.
 
 **How often your AI vehicles show up** (Mod tab): compared with the SCS truck or trailer they
-are copied from. There are dozens of trucks and trailers in traffic, so at 1x you see yours now
-and then. Use "A lot (10x)" to check a build in game, then set it back before sharing.
+are copied from. A traffic trailer of SCS carries every company livery of its type, so at 1x each
+of your skins shows up about as often as one of those companies. There are dozens of trucks and
+trailers in traffic, so at 1x you see yours now and then. Use "A lot (10x)" to check a build in
+game, then set it back before sharing.
+
+**Your fleet**: when a skin has both AI trucks (an SCS truck cab with AI traffic ticked) and an
+AI traffic sheet, that skin's AI trucks pull only that skin's AI trailers, and those trailers
+ride only behind them - a matched truck + trailer fleet, the way Jazzycat's painted traffic
+packs do it. How often you see the fleet is then set by the trucks: at 1x each of your fleet
+trucks is as likely as one of Jazzycat's painted trucks (or any other traffic-pack truck), not
+as rare as SCS's own copy of that model. With big traffic packs installed there are hundreds of
+trucks in the pool, so use 3x if you want to spot your fleet regularly. A skin with AI trailers but
+no AI trucks puts its trailers behind SCS's own AI trucks instead.
 
 **Template folder**: community template sets for SCS's trucks and trailers can replace
 SkinForge's drawn templates. Download them from Trucky:

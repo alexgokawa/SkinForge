@@ -27,8 +27,21 @@ _index: dict = {}     # png path -> {"size": [w, h], "mt": mtime, "mask": hex bi
 _index_file = None
 
 
+# German / Nordic letters in community folder names: "Kögel", "Kässbohrer", "Schwarzmüller"
+_FOLD = str.maketrans({"ä": "a", "ö": "o", "ü": "u", "ß": "ss", "å": "a", "ø": "o", "æ": "ae", "é": "e", "è": "e"})
+# SCS's DLC ids that shorten the brand: id word -> the brand as folders spell it
+BRAND_ALIASES = {"schwmuller": "schwarzmuller", "schw": "schwarzmuller", "kogel": "kogel", "kass": "kassbohrer",
+                 "schmitz": "schmitz", "scb": "schmitz"}
+
+
+def _fold(s):
+    import unicodedata
+    s = (s or "").lower().translate(_FOLD)
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+
 def _compact(s):
-    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+    return re.sub(r"[^a-z0-9]", "", _fold(s))
 
 
 def _load_index():
@@ -164,8 +177,8 @@ def _folders(root):
 def candidate_folders(root, vehicle_id, vehicle_name):
     """Folders of the official set that may hold this vehicle (narrowed by name, never exact)."""
     keys = {_compact(vehicle_id), _compact(vehicle_name)}
-    words = [w for w in re.split(r"[^a-z0-9]+", f"{vehicle_id} {vehicle_name}".lower()) if len(w) > 1]
-    brand = {words[0]} if words else set()
+    words = [w for w in re.split(r"[^a-z0-9]+", _fold(f"{vehicle_id} {vehicle_name}")) if len(w) > 1]
+    brand = {BRAND_ALIASES.get(words[0], words[0])} if words else set()
     if "scs" in words:      # SCS's own trailers: the type word is what matters
         brand = {w for w in words if w not in ("scs", "trailer", "ai")}
     out = []
@@ -183,8 +196,21 @@ def _pngs(folder):
     return out
 
 
-def match(root, vehicle_id, vehicle_name, own_img, cab=False):
-    """Best official PNG for one slot, or None. own_img = SkinForge's template of that slot."""
+ASPECT_MAX = 4.1      # sheets up to 4x wider / taller than SkinForge's are compared too (resampled)
+
+
+def _fit_mask(m, shape):
+    """An official mask at another aspect, resampled to SkinForge's grid (UVs are 0..1 on both:
+    a 2048x1024 sheet of a part SkinForge makes square still lines up once stretched)."""
+    if m.shape == shape:
+        return m
+    im = Image.fromarray(m.astype(np.uint8) * 255).resize((shape[1], shape[0]), Image.Resampling.BOX)
+    return np.array(im) > 0
+
+
+def match(root, vehicle_id, vehicle_name, own_img, cab=False, why=None):
+    """Best official PNG for one slot, or None. own_img = SkinForge's template of that slot.
+    why (a dict) gets the closest miss: {"png", "own_in", "sheet_in", "folders", "pngs"}."""
     if not root or not os.path.isdir(root) or own_img is None:
         return None
     w, h = own_img.size
@@ -197,16 +223,27 @@ def match(root, vehicle_id, vehicle_name, own_img, cab=False):
     with _lock:
         _load_index()
         dirty = False
-        for folder in candidate_folders(root, vehicle_id, vehicle_name):
+        folders = candidate_folders(root, vehicle_id, vehicle_name)
+        near, n_png = (0.0, None, 0.0, 0.0), 0
+        for folder in folders:
             for png in _pngs(folder):
                 had = png in _index
                 size, m = _official_mask(png)
                 dirty |= not had
-                if size is None or size[0] * h != size[1] * w or m.shape != mine.shape:
+                if size is None or not size[1] or not h:
                     continue
-                own_in, sheet_in = score(fill_holes(m), mine, mine_d)
+                n_png += 1
+                ratio = (size[0] / size[1]) / (w / h)
+                if not (1 / ASPECT_MAX <= ratio <= ASPECT_MAX):
+                    continue
+                own_in, sheet_in = score(fill_holes(_fit_mask(m, mine.shape)), mine, mine_d)
+                if min(own_in / OWN_IN, sheet_in / need) > near[0]:
+                    near = (min(own_in / OWN_IN, sheet_in / need), png, own_in, sheet_in)
                 if own_in >= OWN_IN and sheet_in >= need and (sheet_in, own_in) > best_s[::-1]:
                     best, best_s = png, (own_in, sheet_in)
+        if why is not None:
+            why.update({"png": near[1], "own_in": near[2], "sheet_in": near[3],
+                        "folders": [os.path.basename(f) for f in folders], "pngs": n_png})
         if dirty:
             _save_index()
     return best
@@ -245,6 +282,38 @@ def guide(png, size, unused_alpha=200):
     out[~inside] = (34, 38, 46, unused_alpha)
     out[lines] = (0, 0, 0, 210)
     return Image.fromarray(out, "RGBA")
+
+
+def candidates(root, vehicle_id, vehicle_name):
+    """Every PNG a user could pick for this vehicle: its candidate folders first, and when the
+    folder names don't narrow anything down, the whole template folder."""
+    folders = candidate_folders(root, vehicle_id, vehicle_name) or [os.path.join(root, d) for d in _folders(root)]
+    out = []
+    for f in folders:
+        out += sorted(_pngs(f))
+    return out
+
+
+def shape_size(png, size, pot=True):
+    """`size` (SkinForge's sheet for the part) re-shaped like the template-folder sheet: same long
+    side, the sheet's own width:height. An 8192x1024 community sheet on a part SkinForge makes
+    4096x1024 -> 4096x512, so the template, the artwork and the built texture are all 8:1."""
+    import math
+    e = _index.get(png)
+    if e:
+        w0, h0 = e["size"]
+    else:
+        with Image.open(png) as im:
+            w0, h0 = im.size
+    L = max(size)
+    if w0 >= h0:
+        w, h = L, L * h0 / w0
+    else:
+        w, h = L * w0 / h0, L
+    if pot:
+        f = lambda n: max(4, 1 << max(2, round(math.log2(max(n, 1)))))
+        return (f(w), f(h))
+    return (max(4, round(w)), max(4, round(h)))
 
 
 def label(png, root):

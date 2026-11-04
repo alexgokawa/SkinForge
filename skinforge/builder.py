@@ -342,6 +342,12 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
         """Texture size of one truck / trailer / car: its own choice, else the project's."""
         return by_vehicle.get(tid, res)
 
+    sheet_sizes = {k: tuple(v) for k, v in (p.get("sheet_size") or {}).items() if v}
+
+    def tsize(sl):
+        """The part's sheet: its template-folder sheet's shape when the user paints on one."""
+        return sheet_sizes.get(sl.key) or sl.tex_size
+
     def vsize(tid, size):
         """An SCS part's texture size (scanned at the project size) at this vehicle's size."""
         w, h = size or (res, res)
@@ -705,7 +711,7 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
             part_dds = {}
             for sl in parts:
                 rel = cfg_of(sl.key).get("art")
-                size = vsize(tid, sl.tex_size)
+                size = vsize(tid, tsize(sl))
                 if rel:
                     dds = make_texture(rel, root_dir, sl.token, sl.key, size, sid=sid)
                     part_dds[sl.key] = dds
@@ -743,7 +749,7 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
                 anchor = cab or all_parts[0]
                 if cab is not None:
                     rel = cfg_of(cab.key).get("art")
-                    main = make_texture(rel, root_dir, cab.token, cab.key, vsize(tid, cab.tex_size), sid=sid) \
+                    main = make_texture(rel, root_dir, cab.token, cab.key, vsize(tid, tsize(cab)), sid=sid) \
                         if rel else blank_texture(root_dir)
                 else:
                     main = main_trailer or blank_texture(root_dir)
@@ -809,43 +815,9 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
         spawn = max(0.01, min(50.0, float(p.get("ai_spawn") or 1)))
     except (TypeError, ValueError):
         spawn = 1.0
-    if ai_cab_jobs:   # SCS trucks ticked "AI traffic": cab art carried over onto SCS's AI truck
-        from . import ai as AI
-        for tid in dict.fromkeys(j[0] for j in ai_cab_jobs):
-            jobs = [j for j in ai_cab_jobs if j[0] == tid]
-            say(f"AI traffic: matching {tid} cabs to its AI models…")
-            try:
-                pairs = AI.pair_cabs(jobs[0][1].game, tid, [j[1] for j in jobs])
-            except Exception as e:
-                warnings.append(f"{tid}: AI traffic left out - {e}")
-                continue
-            if not pairs:
-                warnings.append(f"{tid}: no SCS AI version of this truck in your game files - AI traffic left out")
-                continue
-            for aslot, cab in pairs:
-                skins_out = []
-                for _t, jcab, sid, sname, main, color in jobs:
-                    if jcab is not cab or main not in tex_images:
-                        continue
-                    say(f"AI traffic: {aslot.ai['name']} · {sname} (transfer from {cab.label})…")
-                    fill = _hex_rgba(color or p.get("base_color") or "#9a9a9a")
-                    im = AI.bake_from_cab(aslot, cab, tex_images[main], 2048, fill)
-                    vid = re.sub(r"[^a-z0-9_]", "_", aslot.trailer.split(".", 1)[1])[:40]
-                    dds = f"/vehicle/ai/sf_{code}/{vid}/{sid or 'a'}.dds"
-                    files[dds] = T.encode_dds_dxt5(im)
-                    files[dds[:-4] + ".tobj"] = T.make_tobj(dds)
-                    skins_out.append((sid, sname, dds))
-                if not skins_out:
-                    continue
-                try:
-                    kind, text = AI.build_files(aslot, skins_out, code, files, say, counter=ai_count, spawn=spawn)
-                except Exception as e:
-                    warnings.append(f"{aslot.ai['name']}: AI traffic left out - {e}")
-                    continue
-                storages.setdefault(kind, []).append(text)
-                for sid, sname, _d in skins_out:
-                    units.append({"token": f"sf{code}{sid or 'a'}", "trailer": aslot.trailer, "slot": "AI traffic",
-                                  "name": sname})
+    # AI trucks of a skin pull that skin's AI trailers (a matched fleet, like Jazzycat's packs)
+    fleet_sids = {j[2] for j in ai_cab_jobs} if ai_trailer_jobs else set()
+    fleet_chains, fleet_texts, fleet_used = {}, {}, set()
     if ai_trailer_jobs:   # SCS trailers ticked "AI traffic": the AI traffic sheet on SCS's traffic trailers
         from . import ai as AI
         for tid in dict.fromkeys(j[0] for j in ai_trailer_jobs):
@@ -882,7 +854,17 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
                     done.add((info["id"], sid))
                     per_info.setdefault(info["id"], (info, []))[1].append((sid, sname, dds))
             model_cache = {}
+            liveries = {}
             for _id, (info, skins_out) in per_info.items():
+                # SCS's traffic trailer unit carries EVERY company livery of its type (company_paint_job/),
+                # our copy carries one: share its spawn_ratio, so 1x = as often as one SCS company
+                folder = info["chassis_path"].rsplit("/", 2)[-2]
+                if folder not in liveries:
+                    try:
+                        names = sheet.game.listdir(f"/def/vehicle/trailer/{folder}/company_paint_job") or []
+                    except Exception:
+                        names = []
+                    liveries[folder] = max(1, sum(1 for x in names if x.endswith(".sii") and x != "default.sii"))
                 aslot = AI._ai_slot(sheet.game, info)
                 aslot.kind = "ai_trailer"
                 say(f"AI traffic: {info['name']} - re-mapping the model so the whole sheet shows…")
@@ -891,10 +873,73 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
                 except Exception as e:
                     ch = None
                     warnings.append(f"{info['name']}: model not re-mapped ({e}) - SCS's layout used, the ends may smear")
-                kind, text = AI.build_trailer_files(aslot, skins_out, code, files, ai_count, spawn=spawn, chassis=ch)
-                storages.setdefault(kind, []).append(text)
+                for one in skins_out:
+                    fleet = one[0] in fleet_sids
+                    kind, text = AI.build_trailer_files(aslot, [one], code, files, ai_count,
+                                                         spawn=spawn / liveries[folder], chassis=ch)
+                    if fleet:
+                        # Jazzycat-style fleet: the trailer only rides behind this skin's own AI
+                        # trucks (trailer_chains), never in SCS's random semi-trailer pool
+                        fleet_chains.setdefault(one[0], []).extend(re.findall(r"traffic_trailer : (\S+)", text))
+                        fleet_texts.setdefault(one[0], []).append((kind, text))
+                    else:
+                        storages.setdefault(kind, []).append(text)
                 for sid, sname, _d in skins_out:
                     units.append({"token": f"sf{code}", "trailer": info["id"], "slot": "AI traffic", "name": sname})
+    if ai_cab_jobs:   # SCS trucks ticked "AI traffic": cab art carried over onto SCS's AI truck
+        from . import ai as AI
+        for tid in dict.fromkeys(j[0] for j in ai_cab_jobs):
+            jobs = [j for j in ai_cab_jobs if j[0] == tid]
+            say(f"AI traffic: matching {tid} cabs to its AI models…")
+            try:
+                every_cab = [sl for sl in slots_by_key.values() if sl.kind == "scs" and sl.trailer == tid and sl.cab]
+                painted = list({id(j[1]): j[1] for j in jobs}.values())    # Slot isn't hashable: dedupe by identity
+                pairs = AI.pair_cabs(jobs[0][1].game, tid, painted, every_cab)
+            except Exception as e:
+                warnings.append(f"{tid}: AI traffic left out - {e}")
+                continue
+            if not pairs:
+                warnings.append(f"{tid}: no SCS AI version of this truck in your game files - AI traffic left out")
+                continue
+            for aslot, cab in pairs:
+                skins_out = []
+                for _t, jcab, sid, sname, main, color in jobs:
+                    if jcab is not cab or main not in tex_images:
+                        continue
+                    say(f"AI traffic: {aslot.ai['name']} · {sname} (transfer from {cab.label})…")
+                    fill = _hex_rgba(color or p.get("base_color") or "#9a9a9a")
+                    im = AI.bake_from_cab(aslot, cab, tex_images[main], 2048, fill)
+                    vid = re.sub(r"[^a-z0-9_]", "_", aslot.trailer.split(".", 1)[1])[:40]
+                    dds = f"/vehicle/ai/sf_{code}/{vid}/{sid or 'a'}.dds"
+                    files[dds] = T.encode_dds_dxt5(im)
+                    files[dds[:-4] + ".tobj"] = T.make_tobj(dds)
+                    skins_out.append((sid, sname, dds))
+                if not skins_out:
+                    continue
+                try:
+                    kind, text = AI.build_files(aslot, skins_out, code, files, say, counter=ai_count, spawn=spawn,
+                                                 chains=fleet_chains)
+                except Exception as e:
+                    warnings.append(f"{aslot.ai['name']}: AI traffic left out - {e}")
+                    continue
+                fleet_used.update(x[0] for x in skins_out)
+                storages.setdefault(kind, []).append(text)
+                for sid, sname, _d in skins_out:
+                    units.append({"token": f"sf{code}{sid or 'a'}", "trailer": aslot.trailer, "slot": "AI traffic",
+                                  "name": sname})
+    for fsid, texts in fleet_texts.items():
+        # a skin whose AI trucks didn't get built: its trailers go back into SCS's random pool
+        for kind, text in texts:
+            if fsid in fleet_used:
+                # rides only behind this skin's own AI trucks: no tags / spawn_ratio, like Jazzycat's
+                # painted trailers (the truck's trailer_chains pick it by name)
+                text = re.sub(r"^\t(tags\[\]|spawn_ratio): .*\n", "", text, flags=re.M)
+                storages.setdefault("trailer_truck", []).append(text)
+            else:
+                storages.setdefault(kind, []).append(text)
+        if fsid not in fleet_used:
+            warnings.append("AI traffic: no AI truck of this skin was built - its AI trailers ride "
+                            "behind SCS's own AI trucks instead")
     if ai_jobs:
         from . import ai as AI
         for key, jobs in sorted(ai_jobs.items()):
@@ -906,7 +951,7 @@ def build(project: dict, project_dir: str, trailers: list, out_path: str, progre
                     im = T.load_image(f.read())
                 size = (min(2048, vres(slot.trailer)),) * 2 if slot.kind == "ai" else \
                     (min(4096, vres(slot.trailer)), min(4096, vres(slot.trailer)) // 2) if slot.kind == "ai_escort" else \
-                    vsize(slot.trailer, slot.tex_size)
+                    vsize(slot.trailer, tsize(slot))
                 fill = _hex_rgba(color or p.get("base_color") or "#9a9a9a")
                 if slot.kind == "ai_escort":
                     # the escort's own livery layout (left / right / roof / front / rear): 1:1

@@ -67,10 +67,62 @@ def _contains(r, bbox):
     return b != bbox and b[0] <= bbox[0] and b[1] <= bbox[1] and b[2] >= bbox[2] and b[3] >= bbox[3]
 
 
+class TracedLock:
+    """RLock that remembers who holds it and since when, so the watchdog can log what a stuck
+    window is waiting on (every request and the Load buttons need this lock)."""
+
+    def __init__(self, name):
+        self._l = threading.RLock()
+        self.name = name
+        self.owner = None
+        self.since = 0.0
+        self.depth = 0
+        self.reported = False
+
+    def acquire(self, blocking=True, timeout=-1):
+        ok = self._l.acquire(blocking, timeout)
+        if ok:
+            if self.depth == 0:
+                self.owner, self.since, self.reported = threading.get_ident(), time.time(), False
+            self.depth += 1
+        return ok
+
+    def release(self):
+        self.depth -= 1
+        if self.depth == 0:
+            held = time.time() - self.since
+            if held > 20:
+                L.info(f"{self.name} lock released after {held:.0f}s")
+            self.owner = None
+        self._l.release()
+
+    __enter__ = acquire
+
+    def __exit__(self, *a):
+        self.release()
+
+
+def _watchdog(app):
+    """Every 10 s: a lock held for more than 30 s gets the holding thread's stack in the log
+    (once per hold) - the answer to "it just spins" without a debugger."""
+    import sys
+    while True:
+        time.sleep(10)
+        for lk in (app.lock, app.cache_lock):
+            own = lk.owner
+            if own is None or lk.reported or time.time() - lk.since < 30:
+                continue
+            lk.reported = True
+            fr = sys._current_frames().get(own)
+            stack = "".join(traceback.format_stack(fr)[-14:]) if fr is not None else "(no frame)"
+            name = next((t.name for t in threading.enumerate() if t.ident == own), str(own))
+            L.info(f"WATCHDOG: {lk.name} lock held {time.time() - lk.since:.0f}s by {name}:\n{stack}")
+
+
 class App:
     def __init__(self):
-        self.lock = threading.RLock()
-        self.cache_lock = threading.RLock()
+        self.lock = TracedLock("app")
+        self.cache_lock = TracedLock("cache")
         self._keylocks = {}
         self.settings_path = os.path.join(P.app_data_dir(), "settings.json")
         self.settings = self._load_settings()
@@ -83,6 +135,7 @@ class App:
         self.guide_cache = LRU(48)    # key -> 1024 guide
         self.art_cache = LRU(24)      # (path, mtime) -> 1024 art
         self.png_cache = LRU(64)
+        self.thumb_cache = LRU(400)      # template-folder sheet thumbnails (Choose sheet…)
         self.build_state = {"running": False, "log": [], "result": None, "error": None}
         self.last_ping = time.time()
         self.bye_at = 0.0
@@ -391,12 +444,25 @@ class App:
                 seen.add(k)
                 srcs.append(s)
         changed = len(srcs) != len(p.get("sources", []))
+        from .scsarchive import is_game_install, find_game_installs
         if not p.get("no_game") and not any(self._is_game_src(s) for s in srcs):
             gf = self._game_folder(p.get("game", "ats"))
             if gf and os.path.normcase(os.path.normpath(gf)) not in seen:
                 srcs.append(gf)
+                seen.add(os.path.normcase(os.path.normpath(gf)))
                 changed = True
                 L.info(f"Game folder added to sources: {gf}")
+        if not p.get("no_game") and not any(os.path.isdir(s) and is_game_install(s) for s in srcs):
+            # only a partial extract (one truck pulled out of the game files) counts as "game files"
+            # otherwise, and then every other SCS truck / trailer is missing: add the install too
+            try:
+                inst = find_game_installs().get(p.get("game", "ats"))
+            except Exception:
+                inst = None
+            if inst and os.path.normcase(os.path.normpath(inst)) not in seen:
+                srcs.append(inst)
+                changed = True
+                L.info(f"Game install added to sources (only an extract was there): {inst}")
         if changed:
             p["sources"] = srcs
             self.save()
@@ -407,7 +473,8 @@ class App:
         keys = set(p.get("slots", {}))
         for art in p.get("skin_art", {}).values():
             keys |= set(art)
-        return set(p.get("scs_trailers", [])) | {k.split("/")[0] for k in keys if k.startswith("scs.")}
+        # any vehicle id with art (scs.* and DLC trailers like krone.*; truck ids in here are ignored)
+        return set(p.get("scs_trailers", [])) | {k.split("/")[0] for k in keys if "/" in k and not k.startswith("@")}
 
     def load_trailer(self, tid):
         """Read one SCS trailer's models (Load button)."""
@@ -465,6 +532,9 @@ class App:
         return found
 
     def load_sources(self, background=False):
+        import sys
+        f = sys._getframe(1)
+        L.info(f"Reading sources ({'background' if background else 'blocking'}) - from {f.f_code.co_name}:{f.f_lineno}")
         """Open the sources and scan them. The scan runs without holding the app lock (reading
         game files from a cloud drive can take a while); results are swapped in at the end.
         background=True (app start): the window opens at once and shows the progress."""
@@ -475,7 +545,7 @@ class App:
         if background:
             self.busy = "Reading game files…"
             self.trailers, self.source_status = [], []
-            threading.Thread(target=self._load_sources, args=(gen,), daemon=True).start()
+            threading.Thread(target=self._load_sources_safe, args=(gen,), daemon=True).start()
             return
         self._load_sources(gen)
 
@@ -485,6 +555,16 @@ class App:
         for art in p.get("skin_art", {}).values():
             keys |= {k for k, v in art.items() if v}
         return keys
+
+    def _load_sources_safe(self, gen):
+        """Background scan: whatever goes wrong, the window must not keep spinning."""
+        try:
+            self._load_sources(gen)
+        except Exception as e:
+            L.error("Reading game files failed", e)
+            if gen == self._gen:
+                self.busy = ""
+                self.source_status = [{"path": "", "ok": False, "error": f"{type(e).__name__}: {e}"}]
 
     def _load_sources(self, gen):
         p = self.project
@@ -530,7 +610,10 @@ class App:
         player_logos.detect(src)
         trailers.append(player_logos.group(p.get("game", "ats")))
         from . import signs   # MattVT / SneaK yard sign packs in the mod folder
-        signs.detect([d for g, d in P.game_mod_dirs().items() if g == GAME_KEY.get(p.get("game", "ats"))])
+        try:
+            signs.detect([d for g, d in P.game_mod_dirs().items() if g == GAME_KEY.get(p.get("game", "ats"))])
+        except Exception as e:     # a bad mod file must never leave the window on "Reading game files…"
+            L.warn(f"Yard sign scan failed: {type(e).__name__}: {e}")
         self._official_root()   # yard signs: templates from the template folder (set before any read)
         sg = signs.group()
         if sg:
@@ -559,9 +642,89 @@ class App:
         return root
 
     def official_for(self, key):
+        """The template-folder sheet used for this slot: the user's own pick first (a path
+        relative to the folder, or "" = SkinForge's own template), else the automatic match."""
+        pick = (self.project.get("official_pick") or {}).get(key)
+        if pick is not None:
+            if pick == "":
+                return None
+            fp = self._official_pick_path(pick)
+            if fp:
+                return fp
         if self.settings.get("official_off"):
             return None
         return (getattr(self, "official", None) or {}).get(key)
+
+    def sheet_size(self, key, size, pot=True):
+        """A part's sheet size, shaped like its template-folder sheet when one is in use (the
+        community's 8:1 strips stay 8:1 in the template, the artwork and the built texture)."""
+        off = self.official_for(key)
+        if not off or not size:
+            return tuple(size) if size else size
+        from . import official as O
+        try:
+            return O.shape_size(off, size, pot)
+        except Exception:
+            return tuple(size)
+
+    def _official_pick_path(self, rel):
+        root = self._official_root()
+        if not root or not rel:
+            return None
+        fp = os.path.normpath(os.path.join(root, rel))
+        if not fp.startswith(os.path.normpath(root)) or not os.path.isfile(fp):
+            return None
+        return fp
+
+    def official_candidates(self, key):
+        from . import official as O
+        root = self._official_root()
+        s = self.slot(key)
+        if not root or s is None:
+            return {"items": [], "pick": None, "auto": None}
+        t = next((x for x in self.trailers if any(y is s for y in x.slots)), None)
+        out = []
+        for png in O.candidates(root, s.trailer, t.name if t else s.trailer):
+            try:
+                with Image.open(png) as im:
+                    w, h = im.size
+            except Exception:
+                continue
+            out.append({"rel": O.label(png, root), "w": w, "h": h})
+        auto = (getattr(self, "official", None) or {}).get(key)
+        return {"items": out, "pick": (self.project.get("official_pick") or {}).get(key),
+                "auto": O.label(auto, root) if auto else None}
+
+    def official_thumb(self, rel, h=140):
+        fp = self._official_pick_path(rel)
+        if not fp:
+            raise ValueError("not in the template folder")
+        ck = ("othumb", fp, os.path.getmtime(fp), h)
+        with self.cache_lock:
+            hit = self.thumb_cache.get(ck)
+        if hit:
+            return hit
+        from . import official as O
+        with Image.open(fp) as im:
+            w0, h0 = im.size
+        size = (max(1, round(w0 * h / h0)), h) if h0 else (h, h)
+        data = T.png_bytes(O.render(fp, size))
+        with self.cache_lock:
+            self.thumb_cache.put(ck, data)
+        return data
+
+    def set_official_pick(self, key, rel):
+        """rel None = automatic again, "" = SkinForge's own template, else a sheet of the folder."""
+        picks = self.project.setdefault("official_pick", {})
+        if rel is None:
+            picks.pop(key, None)
+        elif rel == "":
+            picks[key] = ""
+        else:
+            if not self._official_pick_path(rel):
+                raise ValueError("That sheet isn't in your template folder")
+            picks[key] = rel.replace("\\", "/")
+        self.save()
 
     def _official_scan(self, trailers):
         """Find the official sheet of every SCS truck / trailer slot (background; the masks are
@@ -583,17 +746,31 @@ class App:
             from . import official as O
             self.official_busy = getattr(self, "official_busy", 0) + 1
             try:
+                misses = {}
                 for t, s in todo:
                     if gen != self._official_gen or target is not self.official:
                         return            # folder changed / reloaded meanwhile: a newer scan owns the result
+                    why = {}
                     try:
-                        m = O.match(root, t.id, t.name, self.template_small(s.key), cab=bool(getattr(s, "cab", False)))
+                        m = O.match(root, t.id, t.name, self.template_small(s.key), cab=bool(getattr(s, "cab", False)),
+                                    why=why)
                     except Exception:
                         traceback.print_exc()
                         m = None
                     target[s.key] = m
+                    if not m:
+                        misses.setdefault(t.id, []).append((s.label, why))
                 n = sum(1 for _t, s in todo if target.get(s.key))
                 L.info(f"Official templates: {n} of {len(todo)} slots matched in {root}")
+                for tid, lst in misses.items():   # why the rest didn't match (closest sheet + coverage)
+                    w0 = lst[0][1]
+                    L.info(f"  {tid}: {len(lst)} unmatched · folders {w0.get('folders')} ({w0.get('pngs', 0)} png)")
+                    for label, w in lst[:15]:
+                        if w.get("png"):
+                            L.info(f"    {label}: closest {O.label(w['png'], root)} "
+                                   f"(part on sheet {w['own_in']:.0%}, sheet on part {w['sheet_in']:.0%})")
+                        else:
+                            L.info(f"    {label}: no sheet compared")
             finally:
                 self.official_busy -= 1
         threading.Thread(target=run, daemon=True).start()
@@ -670,7 +847,9 @@ class App:
         return {"dir": (self.settings.get("official_dirs") or {}).get(self.project.get("game", "ats"), ""),
                 "found": bool(root), "off": bool(self.settings.get("official_off")),
                 "busy": bool(getattr(self, "official_busy", 0)),
-                "slots": {k: O.label(v, root) for k, v in (getattr(self, "official", None) or {}).items() if v}}
+                "slots": {**{k: O.label(v, root) for k, v in (getattr(self, "official", None) or {}).items() if v},
+                          **{k: v for k, v in (self.project.get("official_pick") or {}).items() if v}},
+                "picks": dict(self.project.get("official_pick") or {})}
 
     # ---------- AI traffic: only vehicles with a clean, usable template are listed ----------
     def _ai_quality(self):
@@ -1115,6 +1294,12 @@ class App:
         tmpl = self.template_small(key, ovr)
         guide = self.guide_small(key, ovr) if mode in ("paint", "upright") else None
         off = self.official_for(key) if ovr < 0 else None
+        if off:   # the template folder's sheet decides the shape (e.g. the community's 8:1 strips)
+            shp = self.sheet_size(key, tmpl.size, pot=False)
+            if tuple(shp) != tmpl.size:
+                tmpl = tmpl.resize(shp, Image.Resampling.LANCZOS)
+                if guide is not None:
+                    guide = guide.resize(shp, Image.Resampling.LANCZOS)
         if off and guide is not None:   # the template folder's sheet: its lines over the artwork too
             guide = self.official_guide(off, tmpl.size) or guide
         art = self.art_small(rel) if mode != "template" else None
@@ -1198,7 +1383,8 @@ class App:
         sl = self.slot(key)
         if sl is not None and sl.trailer == "yard_signs":
             return self.art_info(im, "sign", sl.tex_size)
-        return self.art_info(im, kind, self.template_small(key, ovr).size if kind != "logo" else None)
+        return self.art_info(im, kind, (self.sheet_size(key, self.template_small(key, ovr).size) if ovr < 0
+                                        else self.template_small(key, ovr).size) if kind != "logo" else None)
 
     def _art_in_use(self, rel, except_key, except_ovr):
         me = B.art_ns(except_key, self.project.get("active_skin", ""))
@@ -1313,9 +1499,9 @@ class App:
                 elif s.kind != "scs" and max(full.size) < res:   # paint at the project resolution (e.g. 2048 templates -> 4096)
                     full = full.resize(T.scaled_size(full.size, res), Image.Resampling.LANCZOS)
                 off = self.official_for(key) if ovr < 0 else None
-                if off:   # SCS's own sheet for this slot (same UVs) - at the size picked above
+                if off:   # SCS's own sheet for this slot (same UVs) - its own shape, at the size picked above
                     from . import official as O
-                    full = O.render(off, full.size)
+                    full = O.render(off, O.shape_size(off, full.size))
                 label = re.sub(r"[^A-Za-z0-9]+", "_", s.label).strip("_") or "main"
                 if suffix:   # parts are shared per vehicle: name them by their own texture
                     label = "part_" + path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
@@ -1417,6 +1603,9 @@ class App:
             L.info(f"Build {out} · res {p.get('resolution')} · finish {p.get('finish')} · "
                    f"per vehicle res {p.get('res_by_vehicle') or {}} finish {p.get('finish_by_vehicle') or {}} "
                    f"lock {p.get('lock_by_vehicle') or {}} · skins {len([x for x in p['skins'] if not x.get('deleted')])}")
+            # parts painted on a template-folder sheet get a texture of that sheet's shape
+            p["sheet_size"] = {s.key: list(self.sheet_size(s.key, s.tex_size)) for t in self.trailers for s in t.slots
+                               if s.kind == "scs" and s.tex_size and self.official_for(s.key)}
             r = B.build(p, self.project_dir, self.trailers, out, progress=lambda m: st["log"].append(m),
                         compose=(self.compose_sig, self.compose_full))
             self.save()
@@ -1542,6 +1731,33 @@ class App:
         self.project["ui_open"] = cur[-200:]
         self.save()
 
+    def recent_colors(self):
+        out = []
+        for c in self.settings.get("recent_colors") or []:
+            if isinstance(c, str) and re.fullmatch(r"#[0-9a-f]{6}", c) and c not in out:
+                out.append(c)
+        return out[:6]
+
+    def remember_color(self, c):
+        """Last 6 colours applied from the colour popover, newest first - app-wide in settings.json
+        (browser storage is lost on every start: the window gets a new port each time)."""
+        c = str(c or "").strip().lower()
+        if not re.fullmatch(r"#[0-9a-f]{6}", c):
+            raise ValueError("not a colour")
+        self.settings["recent_colors"] = [c] + [x for x in self.recent_colors() if x != c][:5]
+        self._save_settings()
+        return self.settings["recent_colors"]
+
+    def _trailers_json(self):
+        out = [t.to_json() for t in self.visible_trailers()]
+        keys = set((getattr(self, "official", None) or {})) | set(self.project.get("official_pick") or {})
+        if keys:
+            for t in out:
+                for sj in t.get("slots", []):
+                    if sj.get("key") in keys and sj.get("tex_size"):
+                        sj["tex_size"] = list(self.sheet_size(sj["key"], sj["tex_size"]))
+        return out
+
     def state(self):
         p = self.view()
         return {
@@ -1549,12 +1765,13 @@ class App:
             "project": p,
             "project_file": self.project_file,
             "project_dir": self.project_dir,
-            "trailers": [t.to_json() for t in self.visible_trailers()],
+            "trailers": self._trailers_json(),
             "ai_check": bool(getattr(self, "ai_checking", False)),
             "official": self.official_json(),
             "sources": self.source_status,
             "mod_dirs": P.game_mod_dirs(),
             "recent": self.settings.get("recent", []),
+            "recent_colors": self.recent_colors(),
             "ui_open": self.ui_open(),
             "build": self.build_state,
             "out_exists": os.path.isfile(self.output_path()),
@@ -1666,6 +1883,10 @@ def make_handler(app: App):
                     return self._send(200, T.png_bytes(im), "image/png")
                 if u.path == "/api/build":
                     return self._json(app.build_state)
+                if u.path == "/api/official/candidates":
+                    return self._json(app.official_candidates(q["key"]))
+                if u.path == "/api/official/thumb":
+                    return self._send(200, app.official_thumb(q["rel"], int(q.get("h", 140))), "image/png")
                 return self._json({"error": "not found"}, 404)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
@@ -1688,8 +1909,13 @@ def make_handler(app: App):
             u = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             app.last_ping = time.time()
+            t0 = time.time()
+            if u.path.startswith("/api/scs/") or u.path in ("/api/sources", "/api/game", "/api/project/open"):
+                L.info(f"POST {u.path} received")      # heavy requests: logged before they wait for the lock
             try:
                 r = self._post(u.path, q)
+                if time.time() - t0 > 5:
+                    L.info(f"POST {u.path} took {time.time() - t0:.1f}s")
                 if r is not None:
                     return self._json(r)
             except (ValueError, KeyError, B.BuildError, SourceError, OSError) as e:
@@ -1920,6 +2146,8 @@ def make_handler(app: App):
                 s = app.slot(d["key"])
                 kind = s.kind if s else "trailer"
                 ts = app.template_small(d["key"], int(d.get("ovr", -1))).size if kind != "logo" else None
+                if ts and int(d.get("ovr", -1)) < 0:
+                    ts = app.sheet_size(d["key"], ts)
                 if s is not None and s.trailer == "yard_signs":
                     kind, ts = "sign", s.tex_size
                 with open(fp, "rb") as f:
@@ -1958,6 +2186,15 @@ def make_handler(app: App):
                 d = self._jbody()
                 with app.lock:
                     app.set_official(d)
+                    return app.state()
+            if path == "/api/colors":
+                d = self._jbody()
+                with app.lock:
+                    return {"recent_colors": app.remember_color(d.get("color"))}
+            if path == "/api/official/pick":
+                d = self._jbody()
+                with app.lock:
+                    app.set_official_pick(d["key"], d.get("rel"))
                     return app.state()
             if path == "/api/ui/open":
                 # which vehicle groups are expanded in the list: kept in the project (not browser
@@ -2062,6 +2299,7 @@ def serve(port: int = 0, open_window: bool = True, browser_fallback: bool = True
     L.info(f"Settings: {app.settings_path} · project: {app.project_file}")
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
+    threading.Thread(target=_watchdog, args=(app,), daemon=True, name="watchdog").start()
     proc = P.launch_app_window(url) if open_window else None
     if open_window and proc is None and browser_fallback:
         webbrowser.open(url)

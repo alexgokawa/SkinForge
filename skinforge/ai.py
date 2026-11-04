@@ -34,6 +34,9 @@ def _read_text(game, path):
     return sii.decode(d) if d and sii.is_text_sii(d) else None
 
 
+DRIVERS_SUI = "/def/vehicle/ai/drivers_generic.sui"   # in base def.scs (SCS escorts + Jazzycat trucks use it)
+
+
 def _includes(text):
     return list(dict.fromkeys(re.findall(r'^\s*@include\s+"([^"]+)"', text or "", re.M)))
 
@@ -325,7 +328,7 @@ def _b36(n):
             return out
 
 
-def build_files(slot, skins, code, files, say=print, spawn=1.0, counter=None, replace_scs=True):
+def build_files(slot, skins, code, files, say=print, spawn=1.0, counter=None, replace_scs=True, chains=None):
     """skins = [(skin id, skin name, dds game path)] for this AI vehicle. Adds the model copies,
     materials, defs and the storage include to `files`. Returns (storage kind, sui text)."""
     info, read = slot.ai, slot.ai_read
@@ -430,16 +433,24 @@ def build_files(slot, skins, code, files, say=print, spawn=1.0, counter=None, re
             aa = [(k, (f'"{ch_path}"' if (is_chassis and k == "data_path") else v)) for k, v in aa]
             acc_units.append(_unit_text(a.cls, an, aa))
         attrs = [("accessories[]", x) for x in acc_names]
+        own = (chains or {}).get(skins[n][0]) if not esc else None
         for k in copy_keys:
             v = u.attrs.get(k)
-            if v is None:
+            if v is None or (own and k == "trailer_chains"):
                 continue
             attrs += [(k + "[]", x) for x in v] if isinstance(v, list) else [(k, v)]
+        if own:   # fleet: this skin's AI trailers only (one is picked per truck)
+            attrs += [("trailer_chains[]", f'"{t}"') for t in own]
         # escorts: 1 = as likely as any other escort (SCS keeps pickups out of the front role with
         # 0.001 - yours should show up, like MS2's escorts)
-        attrs += [("spawn_ratio", "1" if info.get("escorts") else _ratio(u, spawn)), ("color[]", "(1, 1, 1)")]
+        # fleet trucks: weight 1 x factor, like Jazzycat's painted trucks (no spawn_ratio = 1) - SCS's own
+        # 0.2 / 0.5 drowned them among the hundreds of ratio-1 trucks traffic packs add
+        ratio = "1" if info.get("escorts") else (_ratio(None, spawn) if own else _ratio(u, spawn))
+        attrs += [("spawn_ratio", ratio), ("color[]", "(1, 1, 1)")]
         body = _unit_text("traffic_vehicle", f"traffic.{tok}", attrs)
         inc = [i for i in info.get("includes", []) if "driver" in i]
+        if not inc and not info.get("escorts"):
+            inc = [DRIVERS_SUI]   # SCS's generic drivers, included inside the unit like Jazzycat does
         if inc:   # drivers: SCS includes them inside the unit
             body = body[:-1] + "".join(f'@include "{i}"\n' for i in inc) + "}"
         out.append(body + "\n\n" + "\n\n".join(acc_units))
@@ -450,12 +461,12 @@ def _ratio(unit, factor):
     """spawn_ratio of our copy: SCS's own unit's ratio (1 when it has none) x the project's
     "how often" factor - so "like SCS's own" really is as often as that SCS truck / trailer."""
     try:
-        base = float(str(unit.attrs.get("spawn_ratio", "1")).strip('"'))
+        base = 1.0 if unit is None else float(str(unit.attrs.get("spawn_ratio", "1")).strip('"'))
     except (TypeError, ValueError):
         base = 1.0
     if base <= 0.01:      # SCS parks some units at ~0 (on-demand only): use a normal share
         base = 0.5
-    return f"{min(50.0, base * factor):g}"
+    return f"{max(0.001, min(50.0, base * factor)):.4g}"
 
 
 def _scs_chassis_override(read, dp, info, new_paths, col, look):
@@ -744,10 +755,15 @@ def ai_for_truck(game, tid):
 _PAIR_CACHE = {}
 
 
-def pair_cabs(game, tid, cabs):
-    """[(AI slot, player cab slot)]: each AI model of the truck with the cab it matches in 3D."""
+def pair_cabs(game, tid, cabs, all_cabs=None):
+    """[(AI slot, player cab slot)]: each AI model of the truck with the cab it matches in 3D.
+    all_cabs = every cab of the truck: each AI model is matched against all of them and kept only
+    when its best match is one of `cabs` (painted, AI ticked) - otherwise SCS's AI day cab would
+    match a painted sleeper well enough (shared front) and drive around in that livery."""
     from . import transfer as TR
     infos = ai_for_truck(game, tid)
+    mine = {id(c) for c in cabs}
+    pool = list(cabs) + [c for c in (all_cabs or []) if id(c) not in mine and getattr(c, "layouts", None)]
     out = []
     for info in infos:
         lay, _mp = layout(game, info)
@@ -755,7 +771,7 @@ def pair_cabs(game, tid, cabs):
             continue
         A = TR.Surface(lay.tris)
         best = None
-        for cab in cabs:
+        for cab in pool:
             ck = (id(game), info["id"], cab.key)
             if ck not in _PAIR_CACHE:
                 P = TR.Surface([t for L in getattr(cab, "layouts", []) for t in L.tris])
@@ -765,7 +781,7 @@ def pair_cabs(game, tid, cabs):
             off, sc, P, V = _PAIR_CACHE[ck]
             if best is None or sc > best[1]:
                 best = (cab, sc)
-        if best and best[1] >= 0.3:
+        if best and best[1] >= 0.3 and id(best[0]) in mine:
             s = _ai_slot(game, info)
             s.pair = (best[0], _PAIR_CACHE[(id(game), info["id"], best[0].key)], A, lay)
             out.append((s, best[0]))

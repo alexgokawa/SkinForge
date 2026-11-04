@@ -112,7 +112,7 @@ def _is_original(fp):
                     return False      # a repaint built with MS2 / SkinForge (category paint_job)
             # SneaK's master def: read.txt + Template/; other authors: their own defs
             return any(n.startswith(("def/", "template/")) or n == "read.txt" for n in low)
-    except (OSError, zipfile.BadZipFile):
+    except Exception:      # unreadable, broken or password-protected zip (RuntimeError): not a sign pack
         return False
 
 
@@ -152,7 +152,7 @@ def detect(mod_dirs=(), src=None):
                         DETECTED[role] = {"label": _label(pack, n), "pack": pack, "path": "/" + n.lstrip("/"),
                                           "archive": fp, "archive_name": fn, "size": size, "srgb": srgb,
                                           "template": tpl}
-            except (OSError, zipfile.BadZipFile, KeyError):
+            except Exception:      # incl. encrypted zips (RuntimeError: 'manifest.sii is encrypted'): skip the file
                 continue
     return DETECTED
 

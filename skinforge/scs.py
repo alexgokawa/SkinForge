@@ -503,8 +503,12 @@ class MultiSource:
 
     def __init__(self, sources: list):
         self.sources = sources
-        game = next((s for s in sources if getattr(s, "kind", "") == "game"), None)
-        mods = [s for s in sources if getattr(s, "kind", "") != "game"]
+        # the base game: the install folder when there is one (the whole game), else the first extract.
+        # Any other game-kind source (a partial extract, e.g. one truck pulled out with the SCS
+        # extractor) layers on top like a mod instead of replacing the whole game.
+        games = [s for s in sources if getattr(s, "kind", "") == "game"]
+        game = next((s for s in games if isinstance(s, GameInstallSource)), games[0] if games else None)
+        mods = [s for s in sources if s is not game]
         self.game = LayeredGame(mods, game) if (game is not None and mods) else game
 
     def read(self, p):
