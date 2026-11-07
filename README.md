@@ -364,6 +364,9 @@ included with SkinForge.
 
 MIT - see `LICENSE`. Not affiliated with SCS Software.
 
+The open-source components inside `SkinForge.exe` (Python, Pillow, NumPy, PyInstaller) keep their own
+licenses; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
 ## Support
 
 SkinForge is free and open source. If it saves you time, you can buy me a coffee on
